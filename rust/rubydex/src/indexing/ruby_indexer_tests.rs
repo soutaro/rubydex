@@ -3337,6 +3337,7 @@ mod visibility_tests {
                 "invalid-private-constant: Private constant called at top level (2:1-2:35)",
                 "invalid-private-constant: Dynamic receiver for private constant (3:1-3:34)",
                 "invalid-private-constant: Private constant called with non-symbol argument (6:20-6:31)",
+                "invalid-private-constant: Private constant called with non-symbol argument (6:33-6:44)",
             ]
         );
 
@@ -3734,6 +3735,141 @@ mod visibility_tests {
                 "should not create MethodVisibility for module_function in class"
             );
         }
+    }
+
+    #[test]
+    fn index_private_class_method_calls() {
+        let context = index_source(
+            r#"
+            class Foo
+              def self.bar; end
+              def self.baz; end
+              def self.qux; end
+
+              private_class_method :bar, :baz
+              public_class_method "qux"
+            end
+            "#,
+        );
+
+        assert_no_local_diagnostics!(&context);
+
+        assert_definition_at!(&context, "6:25-6:28", MethodVisibility, |def| {
+            assert!(def.flags().is_singleton_method_visibility());
+            assert_string_eq!(&context, def.str_id(), "bar()");
+            assert_eq!(def.visibility(), &Visibility::Private);
+        });
+        assert_definition_at!(&context, "6:31-6:34", MethodVisibility, |def| {
+            assert!(def.flags().is_singleton_method_visibility());
+            assert_string_eq!(&context, def.str_id(), "baz()");
+            assert_eq!(def.visibility(), &Visibility::Private);
+        });
+        assert_definition_at!(&context, "7:23-7:28", MethodVisibility, |def| {
+            assert!(def.flags().is_singleton_method_visibility());
+            assert_string_eq!(&context, def.str_id(), "qux()");
+            assert_eq!(def.visibility(), &Visibility::Public);
+        });
+    }
+
+    #[test]
+    fn index_public_class_method_calls() {
+        let context = index_source(
+            r"
+            class Foo
+              def self.bar; end
+
+              public_class_method :bar
+            end
+            ",
+        );
+
+        assert_no_local_diagnostics!(&context);
+
+        assert_definition_at!(&context, "4:24-4:27", MethodVisibility, |def| {
+            assert!(def.flags().is_singleton_method_visibility());
+            assert_string_eq!(&context, def.str_id(), "bar()");
+            assert_eq!(def.visibility(), &Visibility::Public);
+        });
+    }
+
+    #[test]
+    fn index_private_class_method_calls_diagnostics() {
+        let context = index_source(
+            r"
+            private_class_method :NOT_INDEXED
+            self.private_class_method :NOT_INDEXED
+            foo.private_class_method :NOT_INDEXED
+
+            module Foo
+              private_class_method NOT_INDEXED
+            end
+            ",
+        );
+
+        assert_local_diagnostics_eq!(
+            &context,
+            vec![
+                "invalid-method-visibility: `private_class_method` called at top level (1:1-1:34)",
+                "invalid-method-visibility: `private_class_method` called at top level (2:1-2:39)",
+                "invalid-method-visibility: `private_class_method` called with a non-literal argument (6:24-6:35)",
+            ]
+        );
+    }
+
+    #[test]
+    fn index_private_class_method_inside_method_body_emits_no_diagnostic() {
+        let context = index_source(
+            r"
+            class Foo
+              def self.qux
+                private_class_method :bar
+              end
+            end
+            ",
+        );
+
+        assert_no_local_diagnostics!(&context);
+    }
+
+    #[test]
+    fn index_private_class_method_continues_past_invalid_arg() {
+        let context = index_source(
+            r"
+            class Foo
+              def self.a; end
+              def self.c; end
+
+              private_class_method :a, dynamic_name, :c
+            end
+            ",
+        );
+
+        assert_local_diagnostics_eq!(
+            &context,
+            vec!["invalid-method-visibility: `private_class_method` called with a non-literal argument (5:28-5:40)"]
+        );
+
+        assert_definition_at!(&context, "5:25-5:26", MethodVisibility, |def| {
+            assert!(def.flags().is_singleton_method_visibility());
+            assert_string_eq!(&context, def.str_id(), "a()");
+            assert_eq!(def.visibility(), &Visibility::Private);
+        });
+        assert_definition_at!(&context, "5:43-5:44", MethodVisibility, |def| {
+            assert!(def.flags().is_singleton_method_visibility());
+            assert_string_eq!(&context, def.str_id(), "c()");
+            assert_eq!(def.visibility(), &Visibility::Private);
+        });
+    }
+
+    #[test]
+    fn index_private_class_method_at_top_level_visits_args() {
+        let context = index_source("private_class_method NESTED_REF");
+
+        assert_local_diagnostics_eq!(
+            &context,
+            vec!["invalid-method-visibility: `private_class_method` called at top level (1:1-1:32)"]
+        );
+        assert_constant_references_eq!(&context, ["NESTED_REF"]);
     }
 }
 

@@ -604,8 +604,10 @@ impl<'a> Resolver<'a> {
                         self.graph.add_document_diagnostic(uri_id, diagnostic);
                     }
                 }
-                Definition::MethodVisibility(_) => {
-                    method_visibility_ids.push(id);
+                Definition::MethodVisibility(visibility_def) => {
+                    if !visibility_def.flags().is_singleton_method_visibility() {
+                        method_visibility_ids.push(id);
+                    }
                 }
                 Definition::Class(_)
                 | Definition::SingletonClass(_)

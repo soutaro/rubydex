@@ -40,6 +40,7 @@ bitflags! {
     pub struct DefinitionFlags: u8 {
         const DEPRECATED = 0b0001;
         const PROMOTABLE = 0b0010;
+        const SINGLETON_METHOD_VISIBILITY = 0b0100;
     }
 }
 
@@ -52,6 +53,11 @@ impl DefinitionFlags {
     #[must_use]
     pub fn is_promotable(&self) -> bool {
         self.contains(Self::PROMOTABLE)
+    }
+
+    #[must_use]
+    pub fn is_singleton_method_visibility(&self) -> bool {
+        self.contains(Self::SINGLETON_METHOD_VISIBILITY)
     }
 }
 

@@ -1200,9 +1200,7 @@ impl<'a> RubyIndexer<'a> {
             }
             Some(ruby_prism::Node::SelfNode { .. }) | None => match self.nesting_stack.last() {
                 Some(Nesting::Method(_)) => {
-                    // Dynamic private constant (called from a method), we ignore it but don't report an error since it's valid Ruby
-                    // if being called from a singleton method.
-
+                    self.visit_call_node_parts(node);
                     return;
                 }
                 None => {
@@ -1211,7 +1209,7 @@ impl<'a> RubyIndexer<'a> {
                         Offset::from_prism_location(&node.location()),
                         "Private constant called at top level".to_string(),
                     );
-
+                    self.visit_call_node_parts(node);
                     return;
                 }
                 _ => None,
@@ -1222,7 +1220,7 @@ impl<'a> RubyIndexer<'a> {
                     Offset::from_prism_location(&node.location()),
                     "Dynamic receiver for private constant".to_string(),
                 );
-
+                self.visit_call_node_parts(node);
                 return;
             }
         };
@@ -1252,8 +1250,8 @@ impl<'a> RubyIndexer<'a> {
                         Offset::from_prism_location(&argument.location()),
                         "Private constant called with non-symbol argument".to_string(),
                     );
-
-                    return;
+                    self.visit(&argument);
+                    continue;
                 }
             };
 
@@ -1273,6 +1271,60 @@ impl<'a> RubyIndexer<'a> {
             let definition_id = self.local_graph.add_definition(definition);
 
             self.add_member_to_current_owner(definition_id);
+        }
+    }
+
+    fn handle_singleton_method_visibility(
+        &mut self,
+        node: &ruby_prism::CallNode,
+        visibility: Visibility,
+        call_name: &str,
+    ) {
+        match node.receiver() {
+            Some(ruby_prism::Node::SelfNode { .. }) | None => match self.nesting_stack.last() {
+                Some(Nesting::Method(_)) => {
+                    self.visit_call_node_parts(node);
+                    return;
+                }
+                None => {
+                    self.local_graph.add_diagnostic(
+                        Rule::InvalidMethodVisibility,
+                        Offset::from_prism_location(&node.location()),
+                        format!("`{call_name}` called at top level"),
+                    );
+                    self.visit_call_node_parts(node);
+                    return;
+                }
+                _ => {}
+            },
+            _ => {
+                self.visit_call_node_parts(node);
+                return;
+            }
+        }
+
+        let Some(arguments) = node.arguments() else {
+            return;
+        };
+
+        for argument in &arguments.arguments() {
+            match argument {
+                ruby_prism::Node::SymbolNode { .. } | ruby_prism::Node::StringNode { .. } => {
+                    self.create_method_visibility_definition(
+                        &argument,
+                        visibility,
+                        DefinitionFlags::SINGLETON_METHOD_VISIBILITY,
+                    );
+                }
+                _ => {
+                    self.local_graph.add_diagnostic(
+                        Rule::InvalidMethodVisibility,
+                        Offset::from_prism_location(&argument.location()),
+                        format!("`{call_name}` called with a non-literal argument"),
+                    );
+                    self.visit(&argument);
+                }
+            }
         }
     }
 
@@ -1313,7 +1365,7 @@ impl<'a> RubyIndexer<'a> {
                 arg,
                 ruby_prism::Node::SymbolNode { .. } | ruby_prism::Node::StringNode { .. }
             ) {
-                self.create_method_visibility_definition(&arg, visibility);
+                self.create_method_visibility_definition(&arg, visibility, DefinitionFlags::empty());
             } else {
                 // Unsupported arg — diagnostic + visit for side effects.
                 let arg_offset = Offset::from_prism_location(&arg.location());
@@ -1329,7 +1381,12 @@ impl<'a> RubyIndexer<'a> {
         }
     }
 
-    fn create_method_visibility_definition(&mut self, arg: &ruby_prism::Node, visibility: Visibility) {
+    fn create_method_visibility_definition(
+        &mut self,
+        arg: &ruby_prism::Node,
+        visibility: Visibility,
+        flags: DefinitionFlags,
+    ) {
         let (name, location) = match arg {
             ruby_prism::Node::SymbolNode { .. } => {
                 let symbol = arg.as_symbol_node().unwrap();
@@ -1355,7 +1412,7 @@ impl<'a> RubyIndexer<'a> {
             self.uri_id,
             arg_offset,
             Box::default(),
-            DefinitionFlags::empty(),
+            flags,
             self.current_nesting_definition_id(),
         )));
 
@@ -2048,6 +2105,12 @@ impl Visit<'_> for RubyIndexer<'_> {
             }
             "public_constant" => {
                 self.handle_constant_visibility(node, Visibility::Public);
+            }
+            "private_class_method" => {
+                self.handle_singleton_method_visibility(node, Visibility::Private, "private_class_method");
+            }
+            "public_class_method" => {
+                self.handle_singleton_method_visibility(node, Visibility::Public, "public_class_method");
             }
             _ => {
                 // For method calls that we don't explicitly handle each part, we continue visiting their parts as we
