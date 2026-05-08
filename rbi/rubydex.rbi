@@ -15,6 +15,8 @@ class Rubydex::Comment
 end
 
 class Rubydex::ConstantReference < Rubydex::Reference
+  abstract!
+
   sig { returns(Rubydex::Location) }
   def location; end
 
@@ -36,6 +38,8 @@ class Rubydex::ResolvedConstantReference < Rubydex::ConstantReference
 end
 
 class Rubydex::Declaration
+  abstract!
+
   sig { returns(T::Enumerable[Rubydex::Definition]) }
   def definitions; end
 
@@ -92,6 +96,8 @@ class Rubydex::Method < Rubydex::Declaration
 end
 
 class Rubydex::Namespace < Rubydex::Declaration
+  abstract!
+
   sig { returns(T::Enumerable[Rubydex::ConstantReference]) }
   def references; end
 
@@ -119,6 +125,8 @@ class Rubydex::Module < Rubydex::Namespace; end
 class Rubydex::SingletonClass < Rubydex::Namespace; end
 
 class Rubydex::Definition
+  abstract!
+
   sig { returns(T::Array[Rubydex::Comment]) }
   def comments; end
 
@@ -172,6 +180,8 @@ class Rubydex::ClassDefinition < Rubydex::Definition
 end
 
 class Rubydex::Mixin
+  abstract!
+
   sig { returns(Rubydex::ConstantReference) }
   attr_reader :constant_reference
 
@@ -454,6 +464,8 @@ class Rubydex::MethodReference < Rubydex::Reference
 end
 
 class Rubydex::Reference
+  abstract!
+
   class << self
     private
 
