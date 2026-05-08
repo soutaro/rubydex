@@ -3,6 +3,7 @@ use crate::{
     indexing::{local_graph::LocalGraph, rbs_indexer::RBSIndexer, ruby_indexer::RubyIndexer},
     job_queue::{Job, JobQueue},
     model::graph::Graph,
+    operation::ruby_builder::RubyOperationBuilder,
 };
 use crossbeam_channel::{Sender, unbounded};
 use std::{ffi::OsStr, fs, path::PathBuf, sync::Arc};
@@ -11,6 +12,15 @@ use url::Url;
 pub mod local_graph;
 pub mod rbs_indexer;
 pub mod ruby_indexer;
+
+/// Which backend to use for indexing Ruby files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexerBackend {
+    /// The original tree-walking indexer.
+    RubyIndexer,
+    /// The two-phase operation builder + applier pipeline.
+    OperationBuilder,
+}
 
 /// The language of a source document, used to dispatch to the appropriate indexer
 pub enum LanguageId {
@@ -42,15 +52,22 @@ impl LanguageId {
 /// Job that indexes a single file
 pub struct IndexingJob {
     path: PathBuf,
+    backend: IndexerBackend,
     local_graph_tx: Sender<LocalGraph>,
     errors_tx: Sender<Errors>,
 }
 
 impl IndexingJob {
     #[must_use]
-    pub fn new(path: PathBuf, local_graph_tx: Sender<LocalGraph>, errors_tx: Sender<Errors>) -> Self {
+    pub fn new(
+        path: PathBuf,
+        backend: IndexerBackend,
+        local_graph_tx: Sender<LocalGraph>,
+        errors_tx: Sender<Errors>,
+    ) -> Self {
         Self {
             path,
+            backend,
             local_graph_tx,
             errors_tx,
         }
@@ -84,7 +101,7 @@ impl Job for IndexingJob {
         };
 
         let language = self.path.extension().map_or(LanguageId::Ruby, LanguageId::from);
-        let local_graph = build_local_graph(url.to_string(), &source, &language);
+        let local_graph = build_local_graph(url.to_string(), &source, &language, self.backend);
 
         self.local_graph_tx
             .send(local_graph)
@@ -94,7 +111,7 @@ impl Job for IndexingJob {
 
 /// Indexes a single source string in memory, dispatching to the appropriate indexer based on `language_id`.
 pub fn index_source(graph: &mut Graph, uri: &str, source: &str, language_id: &LanguageId) {
-    let local_graph = build_local_graph(uri.to_string(), source, language_id);
+    let local_graph = build_local_graph(uri.to_string(), source, language_id, IndexerBackend::RubyIndexer);
     graph.consume_document_changes(local_graph);
 }
 
@@ -103,7 +120,7 @@ pub fn index_source(graph: &mut Graph, uri: &str, source: &str, language_id: &La
 /// # Panics
 ///
 /// Will panic if the graph cannot be wrapped in an Arc<Mutex<>>
-pub fn index_files(graph: &mut Graph, paths: Vec<PathBuf>) -> Vec<Errors> {
+pub fn index_files(graph: &mut Graph, paths: Vec<PathBuf>, backend: IndexerBackend) -> Vec<Errors> {
     let queue = Arc::new(JobQueue::new());
     let (local_graphs_tx, local_graphs_rx) = unbounded();
     let (errors_tx, errors_rx) = unbounded();
@@ -111,6 +128,7 @@ pub fn index_files(graph: &mut Graph, paths: Vec<PathBuf>) -> Vec<Errors> {
     for path in paths {
         queue.push(Box::new(IndexingJob::new(
             path,
+            backend,
             local_graphs_tx.clone(),
             errors_tx.clone(),
         )));
@@ -134,13 +152,21 @@ pub fn index_files(graph: &mut Graph, paths: Vec<PathBuf>) -> Vec<Errors> {
 }
 
 /// Indexes a source string using the appropriate indexer for the given language.
-fn build_local_graph(uri: String, source: &str, language: &LanguageId) -> LocalGraph {
+#[must_use]
+pub fn build_local_graph(uri: String, source: &str, language: &LanguageId, backend: IndexerBackend) -> LocalGraph {
     match language {
-        LanguageId::Ruby => {
-            let mut indexer = RubyIndexer::new(uri, source);
-            indexer.index();
-            indexer.local_graph()
-        }
+        LanguageId::Ruby => match backend {
+            IndexerBackend::RubyIndexer => {
+                let mut indexer = RubyIndexer::new(uri, source);
+                indexer.index();
+                indexer.local_graph()
+            }
+            IndexerBackend::OperationBuilder => {
+                let builder = RubyOperationBuilder::new(uri, source);
+                let result = builder.build();
+                crate::operation::applier::apply_operations(result)
+            }
+        },
         LanguageId::Rbs => {
             let mut indexer = RBSIndexer::new(uri, source);
             indexer.index();
@@ -175,7 +201,7 @@ mod tests {
         let relative_to_pwd = &dots.join(absolute_path);
 
         let mut graph = Graph::new();
-        let errors = index_files(&mut graph, vec![relative_to_pwd.clone()]);
+        let errors = index_files(&mut graph, vec![relative_to_pwd.clone()], IndexerBackend::RubyIndexer);
 
         assert!(errors.is_empty());
         assert_eq!(graph.documents().len(), 2);
@@ -196,7 +222,7 @@ mod tests {
         let uri = Url::from_file_path(&path).unwrap().to_string();
 
         let mut graph = Graph::new();
-        let errors = index_files(&mut graph, vec![path]);
+        let errors = index_files(&mut graph, vec![path], IndexerBackend::RubyIndexer);
 
         assert!(errors.is_empty(), "Expected no errors, got: {errors:#?}");
         assert_eq!(6, graph.definitions().len());
