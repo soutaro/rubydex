@@ -174,7 +174,10 @@ class Rubydex::ConstantDefinition < Rubydex::Definition; end
 class Rubydex::GlobalVariableAliasDefinition < Rubydex::Definition; end
 class Rubydex::GlobalVariableDefinition < Rubydex::Definition; end
 class Rubydex::InstanceVariableDefinition < Rubydex::Definition; end
-class Rubydex::MethodAliasDefinition < Rubydex::Definition; end
+class Rubydex::MethodAliasDefinition < Rubydex::Definition
+  sig { returns(T.nilable(Rubydex::Method)) }
+  def target; end
+end
 class Rubydex::MethodDefinition < Rubydex::Definition; end
 
 class Rubydex::ModuleDefinition < Rubydex::Definition
@@ -257,6 +260,7 @@ class Rubydex::Document
 end
 
 class Rubydex::Error < StandardError; end
+class Rubydex::AliasCycleError < Rubydex::Error; end
 
 class Rubydex::Failure
   sig { params(message: String).void }

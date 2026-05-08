@@ -796,6 +796,89 @@ class DefinitionTest < Minitest::Test
     end
   end
 
+  def test_method_alias_definition_target
+    with_context do |context|
+      context.write!("file1.rb", <<~RUBY)
+        class Foo
+          def foo(a, b); end
+          alias bar foo
+        end
+      RUBY
+
+      graph = Rubydex::Graph.new
+      graph.index_all(context.glob("**/*.rb"))
+      graph.resolve
+
+      alias_def = graph["Foo#bar()"].definitions.first
+      assert_instance_of(Rubydex::MethodAliasDefinition, alias_def)
+
+      target = alias_def.target
+      assert_instance_of(Rubydex::Method, target)
+      assert_equal("Foo#foo()", target.name)
+    end
+  end
+
+  def test_method_alias_definition_target_through_chain
+    with_context do |context|
+      context.write!("file1.rb", <<~RUBY)
+        class Foo
+          def foo; end
+          alias bar foo
+          alias baz bar
+        end
+      RUBY
+
+      graph = Rubydex::Graph.new
+      graph.index_all(context.glob("**/*.rb"))
+      graph.resolve
+
+      alias_def = graph["Foo#baz()"].definitions.first
+      assert_instance_of(Rubydex::MethodAliasDefinition, alias_def)
+
+      target = alias_def.target
+      assert_instance_of(Rubydex::Method, target)
+      assert_equal("Foo#foo()", target.name)
+    end
+  end
+
+  def test_method_alias_definition_target_unresolved_returns_nil
+    with_context do |context|
+      context.write!("file1.rb", <<~RUBY)
+        class Foo
+          alias bar nonexistent
+        end
+      RUBY
+
+      graph = Rubydex::Graph.new
+      graph.index_all(context.glob("**/*.rb"))
+      graph.resolve
+
+      alias_def = graph["Foo#bar()"].definitions.first
+      assert_instance_of(Rubydex::MethodAliasDefinition, alias_def)
+      assert_nil(alias_def.target)
+    end
+  end
+
+  def test_method_alias_definition_target_raises_on_cycle
+    with_context do |context|
+      context.write!("file1.rb", <<~RUBY)
+        class Foo
+          alias a b
+          alias b a
+        end
+      RUBY
+
+      graph = Rubydex::Graph.new
+      graph.index_all(context.glob("**/*.rb"))
+      graph.resolve
+
+      alias_def = graph["Foo#a()"].definitions.first
+      assert_instance_of(Rubydex::MethodAliasDefinition, alias_def)
+
+      assert_raises(Rubydex::AliasCycleError) { alias_def.target }
+    end
+  end
+
   private
 
   def assert_same_definition(expected, actual)

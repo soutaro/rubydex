@@ -14,6 +14,7 @@ rescue LoadError
   require "rubydex/rubydex"
 end
 
+require "rubydex/errors"
 require "rubydex/failures"
 require "rubydex/location"
 require "rubydex/comment"

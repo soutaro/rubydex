@@ -341,6 +341,36 @@ static VALUE rdxr_method_alias_definition_signatures(VALUE self) {
     return rdxi_signatures_to_ruby(arr);
 }
 
+// MethodAliasDefinition#target -> Rubydex::Method?
+// Returns the resolved target method declaration by following the alias chain, or nil if the chain could not be
+// resolved (the target name doesn't exist on the owner, or the owner itself never resolved). Raises
+// Rubydex::AliasCycleError when the alias chain forms a cycle.
+static VALUE rdxr_method_alias_definition_target(VALUE self) {
+    HandleData *data;
+    TypedData_Get_Struct(self, HandleData, &handle_type, data);
+
+    void *graph;
+    TypedData_Get_Struct(data->graph_obj, void *, &graph_type, graph);
+
+    CMethodAliasTargetResult result = rdx_method_alias_definition_target(graph, data->id);
+
+    switch (result.status) {
+    case CMethodAliasResolution_Resolved: {
+        VALUE decl_class = rdxi_declaration_class_for_kind(result.declaration->kind);
+        VALUE argv[] = {data->graph_obj, ULL2NUM(result.declaration->id)};
+
+        free_c_declaration(result.declaration);
+        return rb_class_new_instance(2, argv, decl_class);
+    }
+    case CMethodAliasResolution_NotFound:
+        return Qnil;
+    case CMethodAliasResolution_Cycle:
+        rb_raise(rb_const_get(mRubydex, rb_intern("AliasCycleError")), "method alias chain forms a cycle");
+    default:
+        rb_raise(rb_eRuntimeError, "Unknown CMethodAliasResolution: %d", result.status);
+    }
+}
+
 void rdxi_initialize_definition(VALUE mod) {
     mRubydex = mod;
 
@@ -387,5 +417,6 @@ void rdxi_initialize_definition(VALUE mod) {
     cClassVariableDefinition = rb_define_class_under(mRubydex, "ClassVariableDefinition", cDefinition);
     cMethodAliasDefinition = rb_define_class_under(mRubydex, "MethodAliasDefinition", cDefinition);
     rb_define_method(cMethodAliasDefinition, "signatures", rdxr_method_alias_definition_signatures, 0);
+    rb_define_method(cMethodAliasDefinition, "target", rdxr_method_alias_definition_target, 0);
     cGlobalVariableAliasDefinition = rb_define_class_under(mRubydex, "GlobalVariableAliasDefinition", cDefinition);
 }
