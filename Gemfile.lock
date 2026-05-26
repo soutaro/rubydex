@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    rubydex (0.2.3)
+    rubydex (0.2.4)
 
 GEM
   remote: https://rubygems.org/
@@ -27,6 +27,8 @@ GEM
       mini_portile2 (~> 2.8.2)
       racc (~> 1.4)
     nokogiri (1.19.3-arm64-darwin)
+      racc (~> 1.4)
+    nokogiri (1.19.3-x86_64-darwin)
       racc (~> 1.4)
     parallel (1.28.0)
     parser (3.3.11.1)
@@ -82,6 +84,7 @@ GEM
 PLATFORMS
   arm64-darwin-24
   ruby
+  x86_64-darwin
 
 DEPENDENCIES
   extconf_compile_commands_json
