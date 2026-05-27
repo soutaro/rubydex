@@ -1,4 +1,8 @@
-use crate::{assert_mem_size, model::id::Id};
+use crate::{
+    assert_mem_size,
+    model::{definitions::Receiver, id::Id},
+    offset::Offset,
+};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy)]
 pub struct DeclarationMarker;
@@ -11,6 +15,28 @@ pub struct DefinitionMarker;
 // DefinitionId represents the ID of a definition found in a specific file
 pub type DefinitionId = Id<DefinitionMarker>;
 assert_mem_size!(DefinitionId, 8);
+
+#[must_use]
+pub fn namespace_definition_id(uri_id: UriId, offset: &Offset, name_id: NameId) -> DefinitionId {
+    DefinitionId::from(&format!("{}{}{}", *uri_id, offset.start(), *name_id))
+}
+
+#[must_use]
+pub fn method_definition_id(
+    uri_id: UriId,
+    offset: &Offset,
+    str_id: StringId,
+    receiver: Option<&Receiver>,
+) -> DefinitionId {
+    let mut formatted_id = format!("{}{}{}", *uri_id, offset.start(), *str_id);
+    if let Some(receiver) = receiver {
+        match receiver {
+            Receiver::SelfReceiver(def_id) => formatted_id.push_str(&def_id.to_string()),
+            Receiver::ConstantReceiver(name_id) => formatted_id.push_str(&name_id.to_string()),
+        }
+    }
+    DefinitionId::from(&formatted_id)
+}
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy)]
 pub struct UriMarker;

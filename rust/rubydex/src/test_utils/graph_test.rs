@@ -1,20 +1,34 @@
 use super::normalize_indentation;
 #[cfg(test)]
 use crate::diagnostic::Rule;
-use crate::indexing::{self, LanguageId};
+use crate::indexing::{self, IndexerBackend, LanguageId};
 use crate::model::graph::{Graph, NameDependent};
 use crate::model::ids::{NameId, StringId};
 use crate::resolution::Resolver;
 
-#[derive(Default)]
 pub struct GraphTest {
     graph: Graph,
+    backend: IndexerBackend,
+}
+
+impl Default for GraphTest {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GraphTest {
     #[must_use]
     pub fn new() -> Self {
-        Self { graph: Graph::new() }
+        Self::new_with_backend(IndexerBackend::RubyIndexer)
+    }
+
+    #[must_use]
+    pub fn new_with_backend(backend: IndexerBackend) -> Self {
+        Self {
+            graph: Graph::new(),
+            backend,
+        }
     }
 
     #[must_use]
@@ -30,7 +44,8 @@ impl GraphTest {
     /// Indexes a Ruby source
     pub fn index_uri(&mut self, uri: &str, source: &str) {
         let source = normalize_indentation(source);
-        indexing::index_source(&mut self.graph, uri, &source, &LanguageId::Ruby);
+        let local_graph = indexing::build_local_graph(uri.to_string(), &source, &LanguageId::Ruby, self.backend);
+        self.graph.consume_document_changes(local_graph);
     }
 
     /// Indexes an RBS source

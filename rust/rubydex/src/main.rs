@@ -2,7 +2,8 @@ use clap::{Parser, ValueEnum};
 use std::{collections::HashSet, mem};
 
 use rubydex::{
-    indexing, integrity, listing,
+    indexing::{self, IndexerBackend},
+    integrity, listing,
     model::graph::Graph,
     resolution::Resolver,
     stats::{
@@ -32,6 +33,14 @@ struct Args {
     check_integrity: bool,
 
     #[arg(
+        long = "indexer",
+        value_enum,
+        default_value = "ruby-indexer",
+        help = "Which indexer backend to use for Ruby files"
+    )]
+    indexer: Indexer,
+
+    #[arg(
         long = "report-orphans",
         value_name = "PATH",
         num_args = 0..=1,
@@ -47,6 +56,21 @@ enum StopAfter {
     Listing,
     Indexing,
     Resolution,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum Indexer {
+    RubyIndexer,
+    OperationBuilder,
+}
+
+impl From<&Indexer> for IndexerBackend {
+    fn from(indexer: &Indexer) -> Self {
+        match indexer {
+            Indexer::RubyIndexer => IndexerBackend::RubyIndexer,
+            Indexer::OperationBuilder => IndexerBackend::OperationBuilder,
+        }
+    }
 }
 
 fn exit(print_stats: bool) {
@@ -80,7 +104,8 @@ fn main() {
     // Indexing
 
     let mut graph = Graph::new();
-    let errors = time_it!(indexing, { indexing::index_files(&mut graph, file_paths) });
+    let backend = IndexerBackend::from(&args.indexer);
+    let errors = time_it!(indexing, { indexing::index_files(&mut graph, file_paths, backend) });
 
     for error in errors {
         eprintln!("{error}");

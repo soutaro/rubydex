@@ -1,7 +1,7 @@
 use super::normalize_indentation;
 use crate::indexing::local_graph::LocalGraph;
 use crate::indexing::rbs_indexer::RBSIndexer;
-use crate::indexing::ruby_indexer::RubyIndexer;
+use crate::indexing::{IndexerBackend, LanguageId, build_local_graph};
 use crate::model::definitions::Definition;
 use crate::model::graph::NameDependent;
 use crate::model::ids::{NameId, StringId, UriId};
@@ -19,13 +19,14 @@ pub struct LocalGraphTest {
 impl LocalGraphTest {
     #[must_use]
     pub fn new(uri: &str, source: &str) -> Self {
+        Self::new_with_backend(uri, source, IndexerBackend::RubyIndexer)
+    }
+
+    #[must_use]
+    pub fn new_with_backend(uri: &str, source: &str, backend: IndexerBackend) -> Self {
         let uri = uri.to_string();
         let source = normalize_indentation(source);
-
-        let mut indexer = RubyIndexer::new(uri.clone(), &source);
-        indexer.index();
-        let graph = indexer.local_graph();
-
+        let graph = build_local_graph(uri.clone(), &source, &LanguageId::Ruby, backend);
         Self { uri, source, graph }
     }
 

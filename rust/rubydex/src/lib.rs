@@ -7,6 +7,7 @@ pub mod job_queue;
 pub mod listing;
 pub mod model;
 pub mod offset;
+pub mod operation;
 pub mod position;
 pub mod query;
 pub mod resolution;

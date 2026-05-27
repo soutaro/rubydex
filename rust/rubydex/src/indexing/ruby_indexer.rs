@@ -2481,5 +2481,11 @@ impl Visit<'_> for RubyIndexer<'_> {
 }
 
 #[cfg(test)]
+fn backend() -> super::IndexerBackend {
+    super::IndexerBackend::RubyIndexer
+}
+
+#[cfg(test)]
+#[allow(clippy::duplicate_mod)]
 #[path = "ruby_indexer_tests.rs"]
 mod tests;

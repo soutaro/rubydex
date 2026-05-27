@@ -1,3 +1,7 @@
+// This file is included via #[path] by both ruby_indexer.rs and operation/applier.rs
+// to run the same tests against both indexing backends. Each parent module provides
+// a `backend()` function that `index_source` calls via `super::backend()`.
+
 use crate::{
     assert_def_comments_eq, assert_def_mixins_eq, assert_def_name_eq, assert_def_name_offset_eq, assert_def_str_eq,
     assert_def_superclass_ref_eq, assert_definition_at, assert_dependents, assert_local_diagnostics_eq,
@@ -86,7 +90,7 @@ macro_rules! assert_method_references_eq {
 }
 
 fn index_source(source: &str) -> LocalGraphTest {
-    LocalGraphTest::new("file:///foo.rb", source)
+    LocalGraphTest::new_with_backend("file:///foo.rb", source, super::backend())
 }
 
 mod constant_tests {

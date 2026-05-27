@@ -1832,7 +1832,7 @@ impl<'a> Resolver<'a> {
     /// Pre-compute name depths for all names into a `NameId → depth` map. Each name's depth is
     /// computed once via memoized recursion, then used as an O(1) lookup key during sorting in
     /// `prepare_units`.
-    fn compute_name_depths(names: &IdentityHashMap<NameId, NameRef>) -> IdentityHashMap<NameId, u32> {
+    pub(crate) fn compute_name_depths(names: &IdentityHashMap<NameId, NameRef>) -> IdentityHashMap<NameId, u32> {
         let mut cache = IdentityHashMap::with_capacity_and_hasher(names.len(), IdentityHashBuilder);
 
         for &name_id in names.keys() {
@@ -2064,6 +2064,11 @@ impl<'a> Resolver<'a> {
             _ => None,
         }
     }
+}
+
+#[cfg(test)]
+fn backend() -> crate::indexing::IndexerBackend {
+    crate::indexing::IndexerBackend::RubyIndexer
 }
 
 #[cfg(test)]

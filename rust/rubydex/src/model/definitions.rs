@@ -29,7 +29,7 @@ use crate::{
     assert_mem_size,
     model::{
         comment::Comment,
-        ids::{ConstantReferenceId, DefinitionId, NameId, StringId, UriId},
+        ids::{self, ConstantReferenceId, DefinitionId, NameId, StringId, UriId},
         visibility::Visibility,
     },
     offset::Offset,
@@ -289,7 +289,7 @@ impl ClassDefinition {
 
     #[must_use]
     pub fn id(&self) -> DefinitionId {
-        DefinitionId::from(&format!("{}{}{}", *self.uri_id, self.offset.start(), *self.name_id))
+        ids::namespace_definition_id(self.uri_id, &self.offset, self.name_id)
     }
 
     #[must_use]
@@ -411,7 +411,7 @@ impl SingletonClassDefinition {
 
     #[must_use]
     pub fn id(&self) -> DefinitionId {
-        DefinitionId::from(&format!("{}{}{}", *self.uri_id, self.offset.start(), *self.name_id))
+        ids::namespace_definition_id(self.uri_id, &self.offset, self.name_id)
     }
 
     #[must_use]
@@ -515,7 +515,7 @@ impl ModuleDefinition {
 
     #[must_use]
     pub fn id(&self) -> DefinitionId {
-        DefinitionId::from(&format!("{}{}{}", *self.uri_id, self.offset.start(), *self.name_id))
+        ids::namespace_definition_id(self.uri_id, &self.offset, self.name_id)
     }
 
     #[must_use]
@@ -611,7 +611,7 @@ impl ConstantDefinition {
 
     #[must_use]
     pub fn id(&self) -> DefinitionId {
-        DefinitionId::from(&format!("{}{}{}", *self.uri_id, self.offset.start(), *self.name_id))
+        ids::namespace_definition_id(self.uri_id, &self.offset, self.name_id)
     }
 
     #[must_use]
@@ -926,7 +926,7 @@ pub struct MethodDefinition {
 assert_mem_size!(MethodDefinition, 96);
 
 /// The receiver of a singleton method definition.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Receiver {
     /// `def self.foo` - receiver is the enclosing definition (class, module, singleton class or DSL)
     SelfReceiver(DefinitionId),
@@ -965,18 +965,7 @@ impl MethodDefinition {
 
     #[must_use]
     pub fn id(&self) -> DefinitionId {
-        let mut formatted_id = format!("{}{}{}", *self.uri_id, self.offset.start(), *self.str_id);
-
-        if let Some(receiver) = &self.receiver {
-            match receiver {
-                Receiver::SelfReceiver(def_id) => formatted_id.push_str(&def_id.to_string()),
-                Receiver::ConstantReceiver(name_id) => {
-                    formatted_id.push_str(&name_id.to_string());
-                }
-            }
-        }
-
-        DefinitionId::from(&formatted_id)
+        ids::method_definition_id(self.uri_id, &self.offset, self.str_id, self.receiver.as_ref())
     }
 
     #[must_use]

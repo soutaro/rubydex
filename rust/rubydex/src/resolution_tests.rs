@@ -1,4 +1,7 @@
-use super::Resolver;
+// This file is included via #[path] by both resolution.rs and operation/applier.rs
+// to run the same tests against both indexing backends. Each parent module provides
+// a `backend()` function that `graph_test()` calls via `super::backend()`.
+
 use crate::{
     assert_alias_targets_contain, assert_ancestors_eq, assert_constant_alias_target_eq, assert_constant_reference_to,
     assert_constant_reference_unresolved, assert_declaration_definitions_count_eq, assert_declaration_does_not_exist,
@@ -7,15 +10,20 @@ use crate::{
     assert_no_diagnostics, assert_no_members, assert_owner_eq, assert_singleton_class_eq,
     diagnostic::Rule,
     model::{declaration::Ancestors, ids::DeclarationId, name::NameRef},
+    resolution::Resolver,
     test_utils::GraphTest,
 };
+
+fn graph_test() -> GraphTest {
+    GraphTest::new_with_backend(super::backend())
+}
 
 mod constant_resolution_tests {
     use super::*;
 
     #[test]
     fn resolving_top_level_references() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///bar.rb", {
             r"
             class Bar; end
@@ -42,7 +50,7 @@ mod constant_resolution_tests {
 
     #[test]
     fn resolving_nested_reference() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///bar.rb", {
             r"
             module Foo
@@ -63,7 +71,7 @@ mod constant_resolution_tests {
 
     #[test]
     fn resolving_nested_reference_that_refer_to_top_level_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///bar.rb", {
             r"
             class Baz; end
@@ -84,7 +92,7 @@ mod constant_resolution_tests {
 
     #[test]
     fn resolving_constant_path_references_at_top_level() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///bar.rb", {
             r"
             module Foo
@@ -103,7 +111,7 @@ mod constant_resolution_tests {
 
     #[test]
     fn resolving_reference_for_non_existing_declaration() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
               Foo
@@ -117,7 +125,7 @@ mod constant_resolution_tests {
 
     #[test]
     fn resolution_for_top_level_references() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -148,7 +156,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_to_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -168,7 +176,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_to_nested_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -190,7 +198,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_inside_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -213,7 +221,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_in_superclass() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -236,7 +244,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_chained_constant_aliases() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -259,7 +267,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_to_non_existent_target() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             ALIAS_1 = NonExistent
@@ -276,7 +284,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_to_value_in_constant_path() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             VALUE = 1
@@ -296,7 +304,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_defined_before_target() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             ALIAS = Foo
@@ -316,7 +324,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_to_value() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -338,7 +346,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_circular_constant_aliases() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             A = B
@@ -357,7 +365,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_circular_constant_aliases_cross_namespace() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A
@@ -383,7 +391,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_ping_pong() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Left
@@ -422,7 +430,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_self_referential() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module M
@@ -461,7 +469,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_with_multiple_definitions() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module A; end
@@ -486,7 +494,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_with_multiple_targets() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module A
@@ -519,7 +527,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_alias_multi_target_with_circular() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module A
@@ -543,7 +551,7 @@ mod constant_alias_tests {
 
     #[test]
     fn multi_target_alias_constant_added_to_primary_owner() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///modules.rb", {
             r"
             module Foo; end
@@ -575,7 +583,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_class_through_constant_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Outer
@@ -608,7 +616,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_class_definition_through_constant_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Outer
@@ -645,7 +653,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_reference_through_chained_aliases() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///defs.rb", {
             r"
             module Foo
@@ -668,7 +676,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_constant_reference_through_top_level_alias_target() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///defs.rb", {
             r"
             module Foo
@@ -688,7 +696,7 @@ mod constant_alias_tests {
     // Regression test: defining singleton method on alias triggers get_or_create_singleton_class
     #[test]
     fn resolving_singleton_method_on_alias_does_not_panic() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo; end
@@ -703,7 +711,7 @@ mod constant_alias_tests {
 
     #[test]
     fn resolving_instance_variable_on_alias_does_not_panic() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo; end
@@ -721,7 +729,7 @@ mod constant_alias_tests {
     fn method_call_on_namespace_alias() {
         // When a method call occurs in a constant alias to a namespace, the singleton class has to be created for the
         // target namespace and not for the alias
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -741,7 +749,7 @@ mod constant_alias_tests {
 
     #[test]
     fn method_def_on_namespace_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -763,7 +771,7 @@ mod constant_alias_tests {
 
     #[test]
     fn re_opening_constant_alias_as_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///alias.rb", {
             r"
             module Foo
@@ -793,7 +801,7 @@ mod constant_alias_tests {
 
     #[test]
     fn constant_alias_reopened_as_class_with_nested_inheritance() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module Foo
@@ -815,7 +823,7 @@ mod constant_alias_tests {
 
     #[test]
     fn superclass_through_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             class Base; end
@@ -830,7 +838,7 @@ mod constant_alias_tests {
 
     #[test]
     fn mixin_through_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module M; end
@@ -847,7 +855,7 @@ mod constant_alias_tests {
 
     #[test]
     fn including_unresolved_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module Foo; end
@@ -865,7 +873,7 @@ mod constant_alias_tests {
 
     #[test]
     fn prepending_unresolved_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module Foo; end
@@ -883,7 +891,7 @@ mod constant_alias_tests {
 
     #[test]
     fn inheriting_unresolved_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module Foo; end
@@ -900,7 +908,7 @@ mod constant_alias_tests {
 
     #[test]
     fn re_opening_unresolved_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module Foo; end
@@ -934,7 +942,7 @@ mod constant_alias_tests {
 
     #[test]
     fn re_opening_namespace_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module Foo; end
@@ -976,7 +984,7 @@ mod superclass_tests {
 
     #[test]
     fn linearizing_super_classes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo; end
@@ -998,7 +1006,7 @@ mod superclass_tests {
 
     #[test]
     fn descendants_are_tracked_for_parent_classes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -1026,7 +1034,7 @@ mod superclass_tests {
 
     #[test]
     fn linearizing_circular_super_classes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo < Bar; end
@@ -1043,7 +1051,7 @@ mod superclass_tests {
 
     #[test]
     fn resolving_a_constant_inherited_from_the_super_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -1064,7 +1072,7 @@ mod superclass_tests {
 
     #[test]
     fn does_not_loop_forever_on_non_existing_parents() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Bar < Foo
@@ -1085,7 +1093,7 @@ mod superclass_tests {
 
     #[test]
     fn resolving_inherited_constant_dependent_on_complex_parent() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1109,7 +1117,7 @@ mod superclass_tests {
 
     #[test]
     fn linearizing_parent_classes_with_parent_scope() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1129,7 +1137,7 @@ mod superclass_tests {
 
     #[test]
     fn references_with_parent_scope_search_inheritance() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1152,7 +1160,7 @@ mod superclass_tests {
 
     #[test]
     fn ancestors_for_unresolved_parent_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             "
@@ -1185,7 +1193,7 @@ mod include_tests {
 
     #[test]
     fn resolving_constant_references_involved_in_includes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo; end
@@ -1203,7 +1211,7 @@ mod include_tests {
 
     #[test]
     fn resolving_include_using_inherited_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1228,7 +1236,7 @@ mod include_tests {
 
     #[test]
     fn linearizing_included_modules() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo; end
@@ -1256,7 +1264,7 @@ mod include_tests {
 
     #[test]
     fn include_on_dynamic_namespace_definitions() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module B; end
@@ -1286,7 +1294,7 @@ mod include_tests {
 
     #[test]
     fn cyclic_include() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1303,7 +1311,7 @@ mod include_tests {
 
     #[test]
     fn duplicate_includes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1324,7 +1332,7 @@ mod include_tests {
 
     #[test]
     fn indirect_duplicate_includes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -1355,7 +1363,7 @@ mod include_tests {
 
     #[test]
     fn includes_involving_parent_scopes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A
@@ -1389,7 +1397,7 @@ mod include_tests {
 
     #[test]
     fn duplicate_includes_in_parents() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -1420,7 +1428,7 @@ mod include_tests {
 
     #[test]
     fn included_modules_involved_in_definitions() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1448,7 +1456,7 @@ mod include_tests {
 
     #[test]
     fn multiple_mixins_in_same_include() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -1468,7 +1476,7 @@ mod include_tests {
 
     #[test]
     fn descendants_are_tracked_for_includes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo; end
@@ -1494,7 +1502,7 @@ mod prepend_tests {
 
     #[test]
     fn resolving_constant_references_involved_in_prepends() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
 
         // To linearize the ancestors of `Bar`, we need to resolve `Foo` first. However, during that resolution, we need
         // to check `Bar`'s ancestor chain before checking the top level (which is where we'll find `Foo`). In these
@@ -1516,7 +1524,7 @@ mod prepend_tests {
 
     #[test]
     fn resolving_prepend_using_inherited_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         // Prepending `Foo` makes `Bar` available, which we can then prepend as well. This requires resolving constants
         // with partially linearized ancestors
         context.index_uri("file:///foo.rb", {
@@ -1543,7 +1551,7 @@ mod prepend_tests {
 
     #[test]
     fn linearizing_prepended_modules() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo; end
@@ -1571,7 +1579,7 @@ mod prepend_tests {
 
     #[test]
     fn prepend_on_dynamic_namespace_definitions() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module B; end
@@ -1601,7 +1609,7 @@ mod prepend_tests {
 
     #[test]
     fn prepends_track_descendants() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo; end
@@ -1623,7 +1631,7 @@ mod prepend_tests {
 
     #[test]
     fn cyclic_prepend() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1640,7 +1648,7 @@ mod prepend_tests {
 
     #[test]
     fn duplicate_prepends() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1661,7 +1669,7 @@ mod prepend_tests {
 
     #[test]
     fn indirect_duplicate_prepends() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -1692,7 +1700,7 @@ mod prepend_tests {
 
     #[test]
     fn multiple_mixins_in_same_prepend() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -1712,7 +1720,7 @@ mod prepend_tests {
 
     #[test]
     fn prepends_involving_parent_scopes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A
@@ -1746,7 +1754,7 @@ mod prepend_tests {
 
     #[test]
     fn duplicate_prepends_in_parents() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -1777,7 +1785,7 @@ mod prepend_tests {
 
     #[test]
     fn prepended_modules_involved_in_definitions() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -1809,7 +1817,7 @@ mod mixin_dedup_tests {
 
     #[test]
     fn duplicate_includes_and_prepends() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -1835,7 +1843,7 @@ mod mixin_dedup_tests {
 
     #[test]
     fn duplicate_indirect_includes_and_prepends() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -1899,7 +1907,7 @@ mod mixin_dedup_tests {
 
     #[test]
     fn duplicate_includes_and_prepends_through_parents() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -1939,7 +1947,7 @@ mod object_ancestors_tests {
 
     #[test]
     fn ancestors_with_missing_core() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             "
@@ -1958,7 +1966,7 @@ mod object_ancestors_tests {
 
     #[test]
     fn ancestor_patches_to_object_are_correctly_processed() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             "
@@ -1976,7 +1984,7 @@ mod object_ancestors_tests {
 
     #[test]
     fn basic_object_ancestors() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             "
@@ -1991,7 +1999,7 @@ mod object_ancestors_tests {
 
     #[test]
     fn basic_object_ancestors_including_kernel() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             "
@@ -2007,7 +2015,7 @@ mod object_ancestors_tests {
 
     #[test]
     fn constant_resolution_inside_basic_object() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class String; end
@@ -2025,7 +2033,7 @@ mod object_ancestors_tests {
 
     #[test]
     fn top_level_scope_searches_object_ancestors() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Kernel
@@ -2049,7 +2057,7 @@ mod object_ancestors_tests {
 
     #[test]
     fn top_level_script_constant_resolution_searches_object_ancestors() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Kernel
@@ -2071,7 +2079,7 @@ mod object_ancestors_tests {
 
     #[test]
     fn module_own_ancestors_take_priority_over_object_fallback() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module MyConstants
@@ -2100,7 +2108,7 @@ mod object_ancestors_tests {
 
     #[test]
     fn object_inherited_constant_inside_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Kernel
@@ -2132,7 +2140,7 @@ mod singleton_ancestors_tests {
 
     #[test]
     fn singleton_ancestors_for_classes() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo; end
@@ -2199,7 +2207,7 @@ mod singleton_ancestors_tests {
 
     #[test]
     fn singleton_ancestors_for_modules() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo; end
@@ -2249,7 +2257,7 @@ mod singleton_ancestors_tests {
 
     #[test]
     fn singleton_ancestors_with_inherited_parent_modules() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo; end
@@ -2330,7 +2338,7 @@ mod singleton_ancestors_tests {
 
     #[test]
     fn singleton_ancestor_chain_cascades_through_intermediate_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -2366,7 +2374,7 @@ mod singleton_ancestors_tests {
 
     #[test]
     fn extend_creates_singleton_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             "
@@ -2399,7 +2407,7 @@ mod singleton_ancestors_tests {
 
     #[test]
     fn extend_creates_singleton_class_with_existing_singleton_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             "
@@ -2434,7 +2442,7 @@ mod singleton_ancestors_tests {
 
     #[test]
     fn extend_creates_singleton_class_on_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             "
@@ -2457,7 +2465,7 @@ mod singleton_ancestors_tests {
 
     #[test]
     fn singleton_class_created_in_remaining_definitions_has_linearized_ancestors() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -2491,7 +2499,7 @@ mod method_tests {
 
     #[test]
     fn resolution_for_method_with_receiver() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2525,7 +2533,7 @@ mod method_tests {
 
     #[test]
     fn resolution_for_self_method_with_same_name_instance_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -2545,7 +2553,7 @@ mod method_tests {
 
     #[test]
     fn resolution_for_self_method_alias_with_same_name_instance_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri(
             "file:///foo.rbs",
             r"
@@ -2567,7 +2575,7 @@ mod method_tests {
 
     #[test]
     fn resolving_method_defined_inside_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2587,7 +2595,7 @@ mod method_tests {
 
     #[test]
     fn resolving_attr_accessors_inside_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2615,7 +2623,7 @@ mod method_alias_tests {
 
     #[test]
     fn resolving_method_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2635,7 +2643,7 @@ mod method_alias_tests {
     #[test]
     fn resolving_method_alias_with_self_receiver() {
         // SelfReceiver resolves to instance methods (the class directly), not the singleton
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2654,7 +2662,7 @@ mod method_alias_tests {
     #[test]
     fn resolving_alias_method_in_singleton_class_lands_on_singleton() {
         // `class << self; alias_method ...; end` — alias lands on singleton via lexical nesting
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2676,7 +2684,7 @@ mod method_alias_tests {
     #[test]
     fn resolving_self_alias_method_is_equivalent_to_bare_alias_method() {
         // `self.alias_method` and bare `alias_method` resolve identically (instance methods)
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///with_self.rb", {
             r"
             class WithSelf
@@ -2704,7 +2712,7 @@ mod method_alias_tests {
 
     #[test]
     fn resolving_method_alias_with_constant_receiver() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Bar
@@ -2727,7 +2735,7 @@ mod method_alias_tests {
 
     #[test]
     fn resolving_global_variable_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             $foo = 123
@@ -2747,7 +2755,7 @@ mod method_alias_tests {
 
     #[test]
     fn resolving_global_variable_alias_inside_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2775,7 +2783,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_class_variable_in_nested_singleton_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2799,7 +2807,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_class_variable_in_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2818,7 +2826,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_class_variable_only_follows_lexical_nesting() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo; end
@@ -2845,7 +2853,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_class_variable_at_top_level() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             @@var = 123
@@ -2861,7 +2869,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_instance_and_class_instance_variables() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2899,7 +2907,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_instance_variables_with_dynamic_method_owner() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2928,7 +2936,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_class_instance_variable_in_compact_namespace() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Bar; end
@@ -2950,7 +2958,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_instance_variable_in_singleton_class_body() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -2974,7 +2982,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_instance_variable_in_constant_receiver_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -2995,7 +3003,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_top_level_instance_variable() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             @foo = 0
@@ -3012,7 +3020,7 @@ mod variable_tests {
 
     #[test]
     fn resolution_for_instance_variable_with_unresolved_receiver() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -3040,7 +3048,7 @@ mod declaration_creation_tests {
 
     #[test]
     fn resolution_creates_global_declaration() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -3068,7 +3076,7 @@ mod declaration_creation_tests {
 
     #[test]
     fn resolution_for_non_constant_declarations() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -3094,7 +3102,7 @@ mod declaration_creation_tests {
         //
         // If `bar.rb` is loaded first, then `Bar` resolves to top level `Bar` and `Bar::Baz` is defined, completely
         // escaping the `Foo` nesting.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -3122,7 +3130,7 @@ mod declaration_creation_tests {
 
     #[test]
     fn expected_name_depth_order() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -3178,7 +3186,7 @@ mod singleton_class_tests {
 
     #[test]
     fn resolution_for_singleton_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -3203,7 +3211,7 @@ mod singleton_class_tests {
 
     #[test]
     fn resolution_for_nested_singleton_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -3231,7 +3239,7 @@ mod singleton_class_tests {
 
     #[test]
     fn resolution_for_singleton_class_of_external_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo; end
@@ -3261,7 +3269,7 @@ mod singleton_class_tests {
 
     #[test]
     fn singleton_class_is_set() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -3281,7 +3289,7 @@ mod singleton_class_tests {
 
     #[test]
     fn incomplete_method_calls_automatically_trigger_singleton_creation() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -3312,7 +3320,7 @@ mod singleton_class_tests {
 
     #[test]
     fn singleton_class_calls_create_nested_singletons() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -3351,7 +3359,7 @@ mod singleton_class_tests {
 
     #[test]
     fn singleton_class_on_a_scoped_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -3388,7 +3396,7 @@ mod singleton_class_tests {
 
     #[test]
     fn singleton_class_on_a_self_call() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -3428,7 +3436,7 @@ mod singleton_class_tests {
     fn resolves_sibling_constant_inside_singleton_class_method_body() {
         // Constant referenced from inside a method defined in `class << self` must resolve against
         // the lexical scope that encloses the singleton class block, not stop at the singleton class.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A
@@ -3456,7 +3464,7 @@ mod singleton_class_tests {
     fn resolves_sibling_constant_inside_nested_singleton_class() {
         // Nested `class << self` inside a nested class: lookup must still walk outward through
         // every enclosing lexical scope to find a sibling defined far above.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A
@@ -3486,7 +3494,7 @@ mod singleton_class_tests {
     fn resolves_sibling_constant_directly_in_singleton_class_body() {
         // Constant referenced directly in the `class << self` body (not inside a method) — e.g.
         // passed as an argument to a class-level DSL call — must also resolve lexically.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A
@@ -3512,7 +3520,7 @@ mod singleton_class_tests {
     fn singleton_class_lexical_scope_still_resolves_sibling_from_other_scopes() {
         // Sanity / non-regression: a sibling constant must continue to resolve from every other
         // scope where it already worked (instance method body, class body, top level).
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A
@@ -3544,7 +3552,7 @@ mod singleton_class_tests {
     fn singleton_class_scope_does_not_over_resolve_unknown_constant() {
         // Sanity: a constant that genuinely does not exist must remain unresolved even with the
         // fix in place — the fix must not invent resolutions by walking too far.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A
@@ -3570,7 +3578,7 @@ mod fqn_and_naming_tests {
 
     #[test]
     fn distinct_declarations_with_conflicting_string_ids() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -3593,7 +3601,7 @@ mod fqn_and_naming_tests {
 
     #[test]
     fn fully_qualified_names_are_unique() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -3663,7 +3671,7 @@ mod fqn_and_naming_tests {
 
     #[test]
     fn test_nested_same_names() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
               module Foo; end
@@ -3697,7 +3705,7 @@ mod todo_tests {
 
     #[test]
     fn resolution_does_not_loop_infinitely_on_non_existing_constants() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo::Bar
@@ -3724,7 +3732,7 @@ mod todo_tests {
 
     #[test]
     fn resolve_missing_declaration_to_todo() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo::Bar
@@ -3756,7 +3764,7 @@ mod todo_tests {
 
     #[test]
     fn qualified_name_inside_nesting_resolves_when_discovered_incrementally() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///baz.rb", {
             r"
             module Foo
@@ -3790,7 +3798,7 @@ mod todo_tests {
 
     #[test]
     fn promoted_to_real_namespace() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo::Bar
@@ -3820,7 +3828,7 @@ mod todo_tests {
 
     #[test]
     fn promoted_to_real_namespace_incrementally() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///bar.rb", {
             r"
             class Foo::Bar
@@ -3859,7 +3867,7 @@ mod todo_tests {
     #[test]
     fn two_levels_unknown() {
         // class A::B::C — neither A nor B exist. Both should become Todos, C is a Class.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             class A::B::C
@@ -3885,7 +3893,7 @@ mod todo_tests {
     #[test]
     fn three_levels_unknown() {
         // class A::B::C::D — A, B, C are all unknown. Tests recursion beyond depth 2.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             class A::B::C::D
@@ -3913,7 +3921,7 @@ mod todo_tests {
     #[test]
     fn partially_unresolvable() {
         // A exists but B doesn't — A resolves to a real Module, B becomes a Todo under A.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module A; end
@@ -3936,7 +3944,7 @@ mod todo_tests {
     fn shared_by_sibling_classes() {
         // Two classes share the same unknown parent chain. The Todos for A and B should
         // be created once and reused, with both C and D as members of B.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             class A::B::C
@@ -3974,7 +3982,7 @@ mod todo_tests {
         // clears all declarations and re-resolves from scratch. This test verifies that
         // the promotion works when both files are present during the second resolution pass,
         // not that Todos are surgically updated in place.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///c.rb", {
             r"
             class A::B::C
@@ -4011,7 +4019,7 @@ mod todo_tests {
     fn with_self_method_and_ivar() {
         // def self.foo with @x inside a multi-level compact class — the SelfReceiver
         // on the method must find C's declaration to create the singleton class and ivar.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             class A::B::C
@@ -4034,7 +4042,7 @@ mod todo_tests {
     fn nested_inside_module_with_separate_intermediate() {
         // Compact namespace nested inside a module, where the intermediate namespace
         // is defined separately. Bar::Baz should become a Todo since only Bar exists.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             module Foo
@@ -4060,7 +4068,7 @@ mod todo_tests {
         // Baz::Qux inside Foo, where Baz comes from included Bar module.
         // Baz::Qux should resolve through inheritance to Bar::Baz::Qux, not create
         // a top-level Baz Todo.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///file1.rb", {
             r"
             module Foo
@@ -4091,7 +4099,7 @@ mod todo_tests {
 
     #[test]
     fn intermediate_todo_on_constant_alias() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///alias.rb", {
             r"
             module Bar; end
@@ -4118,7 +4126,7 @@ mod todo_tests {
 
     #[test]
     fn rbs_method_definition() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri("file:///foo.rbs", {
             r"
             class Foo
@@ -4141,7 +4149,7 @@ mod todo_tests {
     fn resolves_constant_with_ancestors_partial() {
         // B has Ancestors::Partial because its prepend is defined in another file.
         // X must wait for B's ancestors to resolve, then resolve to A::X.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///1.rb", {
             r"
             module A
@@ -4174,7 +4182,7 @@ mod todo_tests {
     fn resolves_constant_with_ancestor_partial() {
         // C has an Ancestor::Partial entry because O::A is defined in another file.
         // X must wait for O::A to resolve, then resolve to O::A::X.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///1.rb", {
             r"
             class B
@@ -4206,7 +4214,7 @@ mod todo_tests {
 
     #[test]
     fn method_call_on_undefined_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Foo.bar
@@ -4220,7 +4228,7 @@ mod todo_tests {
 
     #[test]
     fn qualified_name_inside_nesting_resolves_to_top_level() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo
@@ -4258,7 +4266,7 @@ mod dynamic_namespace_tests {
         //
         // We need to ensure that the associated Declaration for Bar is transformed into a class if any of its
         // definitions represent one, otherwise we have no place to store the includes and ancestors
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Baz; end
@@ -4279,7 +4287,7 @@ mod dynamic_namespace_tests {
 
     #[test]
     fn resolving_accessing_meta_programming_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Foo = Protobuf.some_dynamic_class
@@ -4293,7 +4301,7 @@ mod dynamic_namespace_tests {
 
     #[test]
     fn inheriting_from_dynamic_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Foo = some_dynamic_class
@@ -4309,7 +4317,7 @@ mod dynamic_namespace_tests {
 
     #[test]
     fn including_dynamic_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Foo = some_dynamic_module
@@ -4326,7 +4334,7 @@ mod dynamic_namespace_tests {
 
     #[test]
     fn prepending_dynamic_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Foo = some_dynamic_module
@@ -4343,7 +4351,7 @@ mod dynamic_namespace_tests {
 
     #[test]
     fn extending_dynamic_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Foo = some_dynamic_module
@@ -4376,7 +4384,7 @@ mod dynamic_namespace_tests {
 
     #[test]
     fn ancestor_operations_on_meta_programming_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Foo; end
@@ -4399,7 +4407,7 @@ mod promotability_tests {
 
     #[test]
     fn non_promotable_constant_not_promoted_to_class_with_members() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             FOO = 42
@@ -4416,7 +4424,7 @@ mod promotability_tests {
 
     #[test]
     fn non_promotable_constant_not_promoted_to_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r#"
                 FOO = "hello"
@@ -4432,7 +4440,7 @@ mod promotability_tests {
 
     #[test]
     fn promotable_constant_is_promoted_to_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Baz; end
@@ -4454,7 +4462,7 @@ mod promotability_tests {
     fn mixed_promotable_and_non_promotable_blocks_promotion() {
         // If the same constant has both a promotable and non-promotable definition,
         // promotion should be blocked
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", "Foo = some_call");
         context.index_uri("file:///b.rb", "Foo = 42");
         context.index_uri("file:///c.rb", "class Foo; end");
@@ -4466,7 +4474,7 @@ mod promotability_tests {
 
     #[test]
     fn promotable_constant_promoted_to_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module Baz; end
@@ -4486,7 +4494,7 @@ mod promotability_tests {
 
     #[test]
     fn class_first_then_constant_stays_namespace() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo; end
@@ -4501,7 +4509,7 @@ mod promotability_tests {
 
     #[test]
     fn promotable_constant_path_write() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             module A; end
@@ -4517,7 +4525,7 @@ mod promotability_tests {
 
     #[test]
     fn method_call_on_promotable_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Qux = some_factory_call
@@ -4532,7 +4540,7 @@ mod promotability_tests {
 
     #[test]
     fn singleton_method_on_non_promotable_constant_does_not_crash() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             FOO = 42
@@ -4547,7 +4555,7 @@ mod promotability_tests {
 
     #[test]
     fn def_self_on_promotable_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Qux = some_factory_call
@@ -4565,7 +4573,7 @@ mod promotability_tests {
         // When a promotable constant is auto-promoted via singleton class access, we conservatively
         // promote to a module (not a class) since we don't know what the call returns.
         // Modules don't inherit from Object.
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Foo = some_factory_call
@@ -4580,7 +4588,7 @@ mod promotability_tests {
 
     #[test]
     fn meta_programming_class_with_members() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             Foo = dynamic_class do
@@ -4597,7 +4605,7 @@ mod promotability_tests {
 
     #[test]
     fn self_method_inside_non_promotable_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             CONST = 1
@@ -4615,7 +4623,7 @@ mod promotability_tests {
 
     #[test]
     fn defining_constant_in_promotable_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             Foo = dynamic
@@ -4632,7 +4640,7 @@ mod promotability_tests {
 
     #[test]
     fn singleton_class_block_for_promotable_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             Foo = dynamic
@@ -4650,7 +4658,7 @@ mod promotability_tests {
 
     #[test]
     fn singleton_class_block_for_non_promotable_constant() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///a.rb", {
             r"
             Foo = 1
@@ -4673,7 +4681,7 @@ mod rbs_tests {
 
     #[test]
     fn rbs_module_and_class_declarations() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri("file:///test.rbs", {
             r"
             module Foo
@@ -4693,7 +4701,7 @@ mod rbs_tests {
 
     #[test]
     fn rbs_nested_declarations() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri("file:///test.rbs", {
             r"
             module Foo
@@ -4720,7 +4728,7 @@ mod rbs_tests {
 
     #[test]
     fn rbs_qualified_module_name() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri("file:///parents.rbs", {
             r"
             module Foo
@@ -4744,7 +4752,7 @@ mod rbs_tests {
 
     #[test]
     fn rbs_qualified_name_inside_nested_module() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri("file:///foo.rbs", {
             r"
             module Outer
@@ -4770,7 +4778,7 @@ mod rbs_tests {
 
     #[test]
     fn rbs_superclass_resolution() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri("file:///test.rbs", {
             r"
             class Foo
@@ -4802,7 +4810,7 @@ mod rbs_tests {
 
     #[test]
     fn rbs_constant_declarations() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri("file:///test.rbs", {
             r"
             FOO: String
@@ -4833,7 +4841,7 @@ mod rbs_tests {
 
     #[test]
     fn rbs_global_declaration() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri("file:///test.rbs", "$foo: String");
         context.resolve();
 
@@ -4848,7 +4856,7 @@ mod rbs_tests {
 
     #[test]
     fn rbs_mixin_resolution() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_rbs_uri("file:///test.rbs", {
             r"
             module Bar
@@ -4872,7 +4880,7 @@ mod rbs_tests {
 
     #[test]
     fn rbs_method_alias_resolution() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri("file:///foo.rb", {
             r"
             class Foo
@@ -4928,7 +4936,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_visibility_override_applies_in_source_order() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -4947,7 +4955,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_visibility_on_direct_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -4973,7 +4981,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_visibility_on_attr_methods() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -4999,7 +5007,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_visibility_on_inherited_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5024,7 +5032,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_visibility_on_grandparent_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5048,7 +5056,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_visibility_on_included_module_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5071,7 +5079,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_visibility_on_undefined_method_emits_diagnostic() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5092,7 +5100,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_visibility_across_reopened_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///a.rb",
             r"
@@ -5117,7 +5125,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_visibility_resolves_when_ancestor_discovered_incrementally() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///child.rb",
             r"
@@ -5150,7 +5158,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_constant_visibility_on_direct_member() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5183,7 +5191,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_constant_visibility_via_qualified_receiver() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5206,7 +5214,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_constant_visibility_multi_arg_undefined_emits_per_name_diagnostic() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5228,7 +5236,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_constant_visibility_inherited_constant_emits_diagnostic() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5254,7 +5262,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_constant_visibility_clears_when_call_removed() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5283,7 +5291,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_constant_visibility_inside_singleton_class_body() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5303,7 +5311,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_constant_visibility_persists_across_reopened_class() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///a.rb",
             r"
@@ -5328,7 +5336,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_singleton_method_visibility_on_direct_member() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5351,7 +5359,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_singleton_method_visibility_on_inherited_method() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5374,7 +5382,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_singleton_method_visibility_on_undefined_method_emits_diagnostic() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5395,7 +5403,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_singleton_method_visibility_undefined_target_diagnostic_clears_when_file_deleted() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
@@ -5428,7 +5436,7 @@ mod visibility_resolution_tests {
 
     #[test]
     fn retroactive_singleton_method_visibility_undefined_target_diagnostic_clears_when_target_added() {
-        let mut context = GraphTest::new();
+        let mut context = graph_test();
         context.index_uri(
             "file:///foo.rb",
             r"
