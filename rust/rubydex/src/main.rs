@@ -2,6 +2,7 @@ use clap::{Parser, ValueEnum};
 use std::{collections::HashSet, mem};
 
 use rubydex::{
+    dot,
     indexing::{self, IndexerBackend},
     integrity, listing,
     model::graph::Graph,
@@ -10,7 +11,6 @@ use rubydex::{
         memory::MemoryStats,
         timer::{Timer, time_it},
     },
-    visualization::dot,
 };
 
 #[derive(Parser, Debug)]
@@ -23,8 +23,11 @@ struct Args {
     #[arg(long = "stop-after", help = "Stop after the given stage")]
     stop_after: Option<StopAfter>,
 
-    #[arg(long = "visualize")]
-    visualize: bool,
+    #[arg(long = "dot", help = "Output a DOT graph visualization")]
+    dot: bool,
+
+    #[arg(long = "show-builtins", help = "Include built-in declarations in DOT output")]
+    show_builtins: bool,
 
     #[arg(long = "stats", help = "Show detailed performance statistics")]
     stats: bool,
@@ -171,8 +174,8 @@ fn main() {
     }
 
     // Generate visualization or print statistics
-    if args.visualize {
-        println!("{}", dot::generate(&graph));
+    if args.dot {
+        println!("{}", dot::DotBuilder::generate(&graph, args.show_builtins));
     } else {
         println!("Indexed {} files", graph.documents().len());
         println!("Found {} names", graph.declarations().len());
