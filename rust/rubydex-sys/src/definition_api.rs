@@ -7,6 +7,7 @@ use crate::reference_api::CConstantReference;
 use libc::c_char;
 use rubydex::model::definitions::{Definition, Mixin};
 use rubydex::model::ids::DefinitionId;
+use rubydex::query::AliasResolutionError;
 use std::ffi::CString;
 use std::ptr;
 
@@ -489,5 +490,74 @@ pub unsafe extern "C" fn rdx_definition_mixins(pointer: GraphPointer, definition
             .collect();
 
         MixinsIter::new(entries.into_boxed_slice())
+    })
+}
+
+/// Status of a `MethodAliasDefinition#target` resolution.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CMethodAliasResolution {
+    /// The alias chain resolved successfully; `declaration` is valid.
+    Resolved = 0,
+    /// The chain could not be resolved because the target name does not exist on the owner, or the owner itself was
+    /// never resolved. Treated as `nil` on the Ruby side.
+    NotFound = 1,
+    /// The alias chain forms a cycle. Surfaced as a `Rubydex::AliasCycleError` on the Ruby side.
+    Cycle = 2,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct CMethodAliasTargetResult {
+    pub status: CMethodAliasResolution,
+    pub declaration: *const CDeclaration,
+}
+
+/// Resolves a `MethodAliasDefinition` to its target method declaration via `query::follow_method_alias` and reports the
+/// outcome as a tagged status. The `declaration` pointer is non-null only when `status == Resolved`; the caller is
+/// responsible for freeing it with `free_c_declaration`.
+///
+/// # Safety
+/// - `pointer` must be a valid pointer previously returned by `rdx_graph_new`.
+/// - `definition_id` must be a valid definition id for a `MethodAliasDefinition`.
+///
+/// # Panics
+/// Panics on graph inconsistencies (the definition is not a method alias, or the alias resolved to a non-method
+/// declaration).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_method_alias_definition_target(
+    pointer: GraphPointer,
+    definition_id: u64,
+) -> CMethodAliasTargetResult {
+    with_graph(pointer, |graph| {
+        let def_id = DefinitionId::new(definition_id);
+
+        match rubydex::query::follow_method_alias(graph, def_id) {
+            Ok(target_id) => {
+                let target_decl = graph
+                    .declarations()
+                    .get(&target_id)
+                    .expect("target declaration must exist");
+                let boxed = Box::new(CDeclaration::from_declaration(target_id, target_decl));
+
+                CMethodAliasTargetResult {
+                    status: CMethodAliasResolution::Resolved,
+                    declaration: Box::into_raw(boxed).cast_const(),
+                }
+            }
+            Err(AliasResolutionError::TargetNotFound | AliasResolutionError::UnresolvedOwner) => {
+                CMethodAliasTargetResult {
+                    status: CMethodAliasResolution::NotFound,
+                    declaration: ptr::null(),
+                }
+            }
+            Err(AliasResolutionError::Cycle) => CMethodAliasTargetResult {
+                status: CMethodAliasResolution::Cycle,
+                declaration: ptr::null(),
+            },
+            Err(err @ (AliasResolutionError::NotAnAlias | AliasResolutionError::TargetNotMethod)) => {
+                panic!("graph inconsistency in method alias resolution: {err:?}")
+            }
+        }
     })
 }
