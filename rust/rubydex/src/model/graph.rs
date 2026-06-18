@@ -311,9 +311,6 @@ impl Graph {
         self.definition_to_declaration_id(self.definitions.get(&definition_id).unwrap())
     }
 
-    /// # Panics
-    ///
-    /// Panics if the definition is not found
     #[must_use]
     pub fn definition_to_declaration_id(&self, definition: &Definition) -> Option<&DeclarationId> {
         let (nesting_name_id, member_str_id) = match definition {
@@ -447,20 +444,21 @@ impl Graph {
     }
 
     /// Looks up the declaration for a `SelfReceiver` method/alias through the singleton class.
+    ///
+    /// Returns `None` when the owner cannot be resolved to a namespace with a singleton class. This
+    /// can happen when the enclosing construct resolved to a non-namespace declaration (e.g. a
+    /// constant or constant alias that a same-named `class`/`module` reopened without promotion), in
+    /// which case the method has no owning declaration.
     fn find_self_receiver_declaration(&self, def_id: DefinitionId, member_str_id: StringId) -> Option<&DeclarationId> {
         let owner_decl_id = self.definition_id_to_declaration_id(def_id)?;
         let singleton_id = self
             .declarations
-            .get(owner_decl_id)
-            .unwrap()
-            .as_namespace()
-            .unwrap()
+            .get(owner_decl_id)?
+            .as_namespace()?
             .singleton_class()?;
         self.declarations
-            .get(singleton_id)
-            .unwrap()
-            .as_namespace()
-            .unwrap()
+            .get(singleton_id)?
+            .as_namespace()?
             .member(&member_str_id)
     }
 
@@ -1545,8 +1543,8 @@ mod tests {
     use crate::model::declaration::Ancestors;
     use crate::test_utils::GraphTest;
     use crate::{
-        assert_declaration_does_not_exist, assert_dependents, assert_descendants, assert_members_eq,
-        assert_no_diagnostics, assert_no_members,
+        assert_declaration_does_not_exist, assert_declaration_kind_eq, assert_dependents, assert_descendants,
+        assert_members_eq, assert_no_diagnostics, assert_no_members,
     };
 
     #[test]
@@ -1566,6 +1564,41 @@ mod tests {
                 .get(&DeclarationId::from("Foo"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn singleton_method_in_non_namespace_owner_does_not_panic() {
+        // `Aliased = Bar` assigns a constant to another constant, producing a (non-promotable)
+        // `ConstantAlias` declaration. Reopening it with `class Aliased` is valid Ruby (it reopens
+        // `Bar`), but the class definition is attached to the existing `ConstantAlias` declaration
+        // without promoting it to a namespace. A `def self.foo` inside then has a `SelfReceiver`
+        // owner whose declaration is not a namespace. Resolving that definition to its declaration
+        // must return `None` rather than panicking.
+        let mut context = GraphTest::new();
+
+        context.index_uri(
+            "file:///foo.rb",
+            "
+            class Bar
+            end
+
+            Aliased = Bar
+
+            class Aliased
+              def self.foo; end
+            end
+            ",
+        );
+        context.resolve();
+
+        // The declaration stays a non-namespace constant alias.
+        assert_declaration_kind_eq!(context, "Aliased", "ConstantAlias");
+
+        // Mirrors what consumers like the DOT exporter do: resolve every definition to its
+        // declaration. This previously panicked on the singleton method's non-namespace owner.
+        for definition in context.graph().definitions().values() {
+            let _ = context.graph().definition_to_declaration_id(definition);
+        }
     }
 
     #[test]
