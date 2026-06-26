@@ -5,13 +5,23 @@
 #include "location.h"
 #include "rustbindings.h"
 
+/*
+ * RDoc parser workaround for https://github.com/ruby/rdoc/issues/1744:
+ * mRubydex = rb_define_module("Rubydex")
+ */
+
 VALUE cReference;
 VALUE cConstantReference;
 VALUE cUnresolvedConstantReference;
 VALUE cResolvedConstantReference;
 VALUE cMethodReference;
 
-// ConstantReference#name -> String
+/*
+ * call-seq:
+ *   name -> String
+ *
+ * Returns the unresolved constant name.
+ */
 static VALUE rdxr_constant_reference_name(VALUE self) {
     HandleData *data;
     TypedData_Get_Struct(self, HandleData, &handle_type, data);
@@ -29,7 +39,12 @@ static VALUE rdxr_constant_reference_name(VALUE self) {
     return str;
 }
 
-// ConstantReference#location -> Rubydex::Location
+/*
+ * call-seq:
+ *   location -> Rubydex::Location
+ *
+ * Returns the source location for this constant reference.
+ */
 static VALUE rdxr_constant_reference_location(VALUE self) {
     HandleData *data;
     TypedData_Get_Struct(self, HandleData, &handle_type, data);
@@ -43,7 +58,12 @@ static VALUE rdxr_constant_reference_location(VALUE self) {
     return location;
 }
 
-// MethodReference#name -> String
+/*
+ * call-seq:
+ *   name -> String
+ *
+ * Returns the referenced method name.
+ */
 static VALUE rdxr_method_reference_name(VALUE self) {
     HandleData *data;
     TypedData_Get_Struct(self, HandleData, &handle_type, data);
@@ -61,7 +81,12 @@ static VALUE rdxr_method_reference_name(VALUE self) {
     return str;
 }
 
-// MethodReference#location -> Rubydex::Location
+/*
+ * call-seq:
+ *   location -> Rubydex::Location
+ *
+ * Returns the source location for this method reference.
+ */
 static VALUE rdxr_method_reference_location(VALUE self) {
     HandleData *data;
     TypedData_Get_Struct(self, HandleData, &handle_type, data);
@@ -75,9 +100,13 @@ static VALUE rdxr_method_reference_location(VALUE self) {
     return location;
 }
 
-// MethodReference#receiver -> Rubydex::Declaration?
-// Returns the resolved declaration for the receiver of the method call. Returns nil when the receiver is not a
-// tracked constant or cannot be resolved.
+/*
+ * call-seq:
+ *   receiver -> Rubydex::Declaration?
+ *
+ * Returns the resolved declaration for the receiver of the method call. Returns nil when the receiver is not a tracked
+ * constant or cannot be resolved.
+ */
 static VALUE rdxr_method_reference_receiver(VALUE self) {
     HandleData *data;
     TypedData_Get_Struct(self, HandleData, &handle_type, data);
@@ -97,7 +126,12 @@ static VALUE rdxr_method_reference_receiver(VALUE self) {
     return rb_class_new_instance(2, argv, decl_class);
 }
 
-// ResolvedConstantReference#declaration -> Declaration
+/*
+ * call-seq:
+ *   declaration -> Rubydex::Declaration
+ *
+ * Returns the resolved declaration.
+ */
 static VALUE rdxr_resolved_constant_reference_declaration(VALUE self) {
     HandleData *data;
     TypedData_Get_Struct(self, HandleData, &handle_type, data);

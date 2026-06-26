@@ -1,0 +1,5 @@
+README.md
+CONTRIBUTING.md
+docs/*.md
+lib/**/*.rb
+ext/rubydex/*.c

@@ -4,6 +4,7 @@ require "bundler/gem_tasks"
 require "rubocop/rake_task"
 require "rake/extensiontask"
 require "rake/testtask"
+require "rdoc/task"
 
 GEMSPEC = Gem::Specification.load("rubydex.gemspec")
 
@@ -27,6 +28,10 @@ rescue LoadError
 end
 
 RuboCop::RakeTask.new
+
+RDoc::Task.new do |doc|
+  doc.rdoc_dir = "_site"
+end
 
 task :lint do
   puts "******** Linting ********\n"
