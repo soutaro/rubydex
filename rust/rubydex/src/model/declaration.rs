@@ -91,7 +91,7 @@ macro_rules! namespace_declaration {
         #[derive(Debug)]
         pub struct $name {
             /// The fully qualified name of this declaration
-            name: String,
+            name: Box<str>,
             /// The list of definition IDs that compose this declaration
             definition_ids: Vec<DefinitionId>,
             /// The set of references that are made to this declaration
@@ -116,7 +116,7 @@ macro_rules! namespace_declaration {
             #[must_use]
             pub fn new(name: String, owner_id: DeclarationId) -> Self {
                 Self {
-                    name,
+                    name: name.into_boxed_str(),
                     definition_ids: Vec::new(),
                     members: IdentityHashMap::default(),
                     references: IdentityHashSet::default(),
@@ -231,7 +231,7 @@ macro_rules! simple_declaration {
         #[derive(Debug)]
         pub struct $name {
             /// The fully qualified name of this declaration
-            name: String,
+            name: Box<str>,
             /// The list of definition IDs that compose this declaration
             definition_ids: Vec<DefinitionId>,
             /// The set of references that are made to this declaration
@@ -244,7 +244,7 @@ macro_rules! simple_declaration {
             #[must_use]
             pub fn new(name: String, owner_id: DeclarationId) -> Self {
                 Self {
-                    name,
+                    name: name.into_boxed_str(),
                     definition_ids: Vec::new(),
                     references: IdentityHashSet::default(),
                     owner_id,
@@ -608,25 +608,25 @@ impl Namespace {
 }
 
 namespace_declaration!(Class, ClassDeclaration);
-assert_mem_size!(ClassDeclaration, 192);
+assert_mem_size!(ClassDeclaration, 184);
 namespace_declaration!(Module, ModuleDeclaration);
-assert_mem_size!(ModuleDeclaration, 192);
+assert_mem_size!(ModuleDeclaration, 184);
 namespace_declaration!(SingletonClass, SingletonClassDeclaration);
-assert_mem_size!(SingletonClassDeclaration, 192);
+assert_mem_size!(SingletonClassDeclaration, 184);
 namespace_declaration!(Todo, TodoDeclaration);
-assert_mem_size!(TodoDeclaration, 192);
+assert_mem_size!(TodoDeclaration, 184);
 simple_declaration!(ConstantDeclaration, ConstantReferenceId);
-assert_mem_size!(ConstantDeclaration, 88);
+assert_mem_size!(ConstantDeclaration, 80);
 simple_declaration!(MethodDeclaration, MethodReferenceId);
-assert_mem_size!(MethodDeclaration, 88);
+assert_mem_size!(MethodDeclaration, 80);
 simple_declaration!(GlobalVariableDeclaration, GlobalVariableReferenceId);
-assert_mem_size!(GlobalVariableDeclaration, 88);
+assert_mem_size!(GlobalVariableDeclaration, 80);
 simple_declaration!(InstanceVariableDeclaration, InstanceVariableReferenceId);
-assert_mem_size!(InstanceVariableDeclaration, 88);
+assert_mem_size!(InstanceVariableDeclaration, 80);
 simple_declaration!(ClassVariableDeclaration, ClassVariableReferenceId);
-assert_mem_size!(ClassVariableDeclaration, 88);
+assert_mem_size!(ClassVariableDeclaration, 80);
 simple_declaration!(ConstantAliasDeclaration, ConstantReferenceId);
-assert_mem_size!(ConstantAliasDeclaration, 88);
+assert_mem_size!(ConstantAliasDeclaration, 80);
 
 #[cfg(test)]
 mod tests {
