@@ -43,6 +43,10 @@ fn is_indexable_file(path: &Path) -> bool {
         .is_some_and(|ext| ext == "rb" || ext == "rake" || ext == "rbs" || ext == "ru")
 }
 
+fn is_excluded(excluded_paths: &HashSet<PathBuf>, path: &Path) -> bool {
+    excluded_paths.contains(path)
+}
+
 impl FileDiscoveryJob {
     fn handle_file(&self, path: &Path) {
         if is_indexable_file(path) {
@@ -62,7 +66,7 @@ impl FileDiscoveryJob {
             return;
         };
 
-        if self.excluded_paths.contains(&canonicalized) {
+        if is_excluded(&self.excluded_paths, &canonicalized) {
             return;
         }
 
@@ -107,7 +111,7 @@ impl Job for FileDiscoveryJob {
                 let kind = entry.file_type().unwrap();
 
                 if kind.is_dir() {
-                    if self.excluded_paths.contains(&entry.path()) {
+                    if is_excluded(&self.excluded_paths, &entry.path()) {
                         continue;
                     }
 
@@ -172,7 +176,7 @@ pub fn collect_file_paths<S: BuildHasher>(
             continue;
         };
 
-        if excluded.contains(&canonicalized) {
+        if is_excluded(&excluded, &canonicalized) {
             continue;
         }
 
