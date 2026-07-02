@@ -3,6 +3,7 @@ use crate::{
     job_queue::{Job, JobQueue},
 };
 use crossbeam_channel::{Sender, unbounded};
+use glob::Pattern;
 use std::{
     collections::HashSet,
     fs,
@@ -16,7 +17,7 @@ pub struct FileDiscoveryJob {
     queue: Arc<JobQueue>,
     paths_tx: Sender<PathBuf>,
     errors_tx: Sender<Errors>,
-    excluded_paths: Arc<HashSet<Box<str>>>,
+    excluded_patterns: Arc<Vec<Pattern>>,
 }
 
 impl FileDiscoveryJob {
@@ -26,14 +27,14 @@ impl FileDiscoveryJob {
         queue: Arc<JobQueue>,
         paths_tx: Sender<PathBuf>,
         errors_tx: Sender<Errors>,
-        excluded_paths: Arc<HashSet<Box<str>>>,
+        excluded_patterns: Arc<Vec<Pattern>>,
     ) -> Self {
         Self {
             path,
             queue,
             paths_tx,
             errors_tx,
-            excluded_paths,
+            excluded_patterns,
         }
     }
 }
@@ -43,8 +44,8 @@ fn is_indexable_file(path: &Path) -> bool {
         .is_some_and(|ext| ext == "rb" || ext == "rake" || ext == "rbs" || ext == "ru")
 }
 
-fn is_excluded(excluded_paths: &HashSet<Box<str>>, path: &Path) -> bool {
-    path.to_str().is_some_and(|path| excluded_paths.contains(path))
+fn is_excluded(excluded_patterns: &[Pattern], path: &Path) -> bool {
+    excluded_patterns.iter().any(|pattern| pattern.matches_path(path))
 }
 
 impl FileDiscoveryJob {
@@ -66,7 +67,7 @@ impl FileDiscoveryJob {
             return;
         };
 
-        if is_excluded(&self.excluded_paths, &canonicalized) {
+        if is_excluded(&self.excluded_patterns, &canonicalized) {
             return;
         }
 
@@ -75,7 +76,7 @@ impl FileDiscoveryJob {
             Arc::clone(&self.queue),
             self.paths_tx.clone(),
             self.errors_tx.clone(),
-            Arc::clone(&self.excluded_paths),
+            Arc::clone(&self.excluded_patterns),
         )));
     }
 
@@ -111,7 +112,7 @@ impl Job for FileDiscoveryJob {
                 let kind = entry.file_type().unwrap();
 
                 if kind.is_dir() {
-                    if is_excluded(&self.excluded_paths, &entry.path()) {
+                    if is_excluded(&self.excluded_patterns, &entry.path()) {
                         continue;
                     }
 
@@ -120,7 +121,7 @@ impl Job for FileDiscoveryJob {
                         Arc::clone(&self.queue),
                         self.paths_tx.clone(),
                         self.errors_tx.clone(),
-                        Arc::clone(&self.excluded_paths),
+                        Arc::clone(&self.excluded_patterns),
                     )));
                 } else if kind.is_file() {
                     self.handle_file(&entry.path());
@@ -164,12 +165,13 @@ pub fn collect_file_paths<S: BuildHasher>(
     let (files_tx, files_rx) = unbounded();
     let (errors_tx, errors_rx) = unbounded();
 
-    // Canonicalize the excluded paths since they may be symlinks
-    let excluded: Arc<HashSet<Box<str>>> = Arc::new(
+    // Canonicalize the excluded paths (they may be symlinks) and turn each into a pattern. Escaping keeps
+    // matching exact.
+    let excluded_patterns: Arc<Vec<Pattern>> = Arc::new(
         excluded
             .iter()
             .filter_map(|entry| fs::canonicalize(&**entry).ok())
-            .map(|canonical| canonical.to_string_lossy().into())
+            .filter_map(|canonical| Pattern::new(&Pattern::escape(&canonical.to_string_lossy())).ok())
             .collect(),
     );
 
@@ -182,7 +184,7 @@ pub fn collect_file_paths<S: BuildHasher>(
             continue;
         };
 
-        if is_excluded(&excluded, &canonicalized) {
+        if is_excluded(&excluded_patterns, &canonicalized) {
             continue;
         }
 
@@ -191,7 +193,7 @@ pub fn collect_file_paths<S: BuildHasher>(
             Arc::clone(&queue),
             files_tx.clone(),
             errors_tx.clone(),
-            Arc::clone(&excluded),
+            Arc::clone(&excluded_patterns),
         )));
     }
 
