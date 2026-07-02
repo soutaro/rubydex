@@ -9,15 +9,23 @@ use std::ops::Deref;
 /// graph when its count reaches zero.
 #[derive(Debug)]
 pub struct StringRef {
-    value: String,
+    value: Box<str>,
     ref_count: u32,
 }
-assert_mem_size!(StringRef, 32);
+assert_mem_size!(StringRef, 24);
 
 impl StringRef {
     #[must_use]
     pub fn new(value: String) -> Self {
-        Self { value, ref_count: 1 }
+        Self {
+            value: value.into_boxed_str(),
+            ref_count: 1,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.value
     }
 
     #[must_use]
@@ -44,7 +52,7 @@ impl StringRef {
 }
 
 impl Deref for StringRef {
-    type Target = String;
+    type Target = str;
 
     fn deref(&self) -> &Self::Target {
         &self.value
