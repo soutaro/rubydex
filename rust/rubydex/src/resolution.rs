@@ -300,6 +300,21 @@ impl<'a> Resolver<'a> {
 
     /// Handles a unit of work for linearizing ancestors of a declaration
     fn handle_ancestor_unit(&mut self, id: DeclarationId) {
+        // The chain may already have been linearized transitively while processing another unit — don't clone it
+        // again just to check
+        if self
+            .graph
+            .declarations()
+            .get(&id)
+            .unwrap()
+            .as_namespace()
+            .unwrap()
+            .has_complete_ancestors()
+        {
+            self.made_progress = true;
+            return;
+        }
+
         match self.ancestors_of(id) {
             Ancestors::Complete(_) | Ancestors::Cyclic(_) => {
                 // We succeeded in some capacity this time
@@ -1694,6 +1709,39 @@ impl<'a> Resolver<'a> {
 
     /// Search for a member in a declaration's ancestor chain.
     fn search_ancestors(&mut self, declaration_id: DeclarationId, str_id: StringId) -> Outcome {
+        // If the chain is already complete, search it by reference. Linearization only mutates the graph when the
+        // chain hasn't been computed yet, so this path avoids cloning the cached ancestors on every lookup
+        {
+            let graph = &*self.graph;
+            let namespace = graph
+                .declarations()
+                .get(&declaration_id)
+                .unwrap()
+                .as_namespace()
+                .unwrap();
+
+            if namespace.has_complete_ancestors() {
+                return namespace
+                    .ancestors()
+                    .iter()
+                    .find_map(|ancestor| {
+                        if let Ancestor::Complete(ancestor_id) = ancestor {
+                            graph
+                                .declarations()
+                                .get(ancestor_id)
+                                .unwrap()
+                                .as_namespace()
+                                .unwrap()
+                                .member(&str_id)
+                                .map(|id| Outcome::Resolved(*id, None))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(Outcome::Unresolved(None));
+            }
+        }
+
         match self.ancestors_of(declaration_id) {
             Ancestors::Complete(ids) | Ancestors::Cyclic(ids) => ids
                 .iter()
