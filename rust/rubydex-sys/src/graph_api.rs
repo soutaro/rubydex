@@ -182,8 +182,8 @@ pub unsafe extern "C" fn rdx_graph_resolve_constant(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_graph_exclude_paths(pointer: GraphPointer, paths: *const *const c_char, count: usize) {
     let paths: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(paths, count).unwrap() };
-    let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    with_mut_graph(pointer, |graph| graph.exclude_paths(path_bufs));
+    let entries: Vec<Box<str>> = paths.into_iter().map(String::into_boxed_str).collect();
+    with_mut_graph(pointer, |graph| graph.exclude_paths(entries));
 }
 
 /// Returns the currently excluded paths as an array of C strings. Writes the count to `out_count`. Returns NULL if no
@@ -213,7 +213,7 @@ pub unsafe extern "C" fn rdx_graph_excluded_paths(
                 // on Windows if a configuration file is using forward slashes. For example:
                 //
                 // C:\project/vendor/bundle
-                let normalized = path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+                let normalized = path.replace(std::path::MAIN_SEPARATOR, "/");
 
                 CString::new(normalized)
                     .ok()

@@ -16,7 +16,7 @@ pub struct FileDiscoveryJob {
     queue: Arc<JobQueue>,
     paths_tx: Sender<PathBuf>,
     errors_tx: Sender<Errors>,
-    excluded_paths: Arc<HashSet<PathBuf>>,
+    excluded_paths: Arc<HashSet<Box<str>>>,
 }
 
 impl FileDiscoveryJob {
@@ -26,7 +26,7 @@ impl FileDiscoveryJob {
         queue: Arc<JobQueue>,
         paths_tx: Sender<PathBuf>,
         errors_tx: Sender<Errors>,
-        excluded_paths: Arc<HashSet<PathBuf>>,
+        excluded_paths: Arc<HashSet<Box<str>>>,
     ) -> Self {
         Self {
             path,
@@ -43,8 +43,8 @@ fn is_indexable_file(path: &Path) -> bool {
         .is_some_and(|ext| ext == "rb" || ext == "rake" || ext == "rbs" || ext == "ru")
 }
 
-fn is_excluded(excluded_paths: &HashSet<PathBuf>, path: &Path) -> bool {
-    excluded_paths.contains(path)
+fn is_excluded(excluded_paths: &HashSet<Box<str>>, path: &Path) -> bool {
+    path.to_str().is_some_and(|path| excluded_paths.contains(path))
 }
 
 impl FileDiscoveryJob {
@@ -158,14 +158,20 @@ impl Job for FileDiscoveryJob {
 #[must_use]
 pub fn collect_file_paths<S: BuildHasher>(
     paths: Vec<String>,
-    excluded: &HashSet<PathBuf, S>,
+    excluded: &HashSet<Box<str>, S>,
 ) -> (Vec<PathBuf>, Vec<Errors>) {
     let queue = Arc::new(JobQueue::new());
     let (files_tx, files_rx) = unbounded();
     let (errors_tx, errors_rx) = unbounded();
 
     // Canonicalize the excluded paths since they may be symlinks
-    let excluded: Arc<HashSet<PathBuf>> = Arc::new(excluded.iter().filter_map(|p| fs::canonicalize(p).ok()).collect());
+    let excluded: Arc<HashSet<Box<str>>> = Arc::new(
+        excluded
+            .iter()
+            .filter_map(|entry| fs::canonicalize(&**entry).ok())
+            .map(|canonical| canonical.to_string_lossy().into())
+            .collect(),
+    );
 
     for path in paths {
         let Ok(canonicalized) = fs::canonicalize(&path) else {
@@ -209,7 +215,7 @@ mod tests {
     fn collect_document_paths_with_exclusions(
         context: &Context,
         paths: &[&str],
-        excluded: &HashSet<PathBuf>,
+        excluded: &HashSet<Box<str>>,
     ) -> (Vec<String>, Vec<Errors>) {
         let (files, errors) = collect_file_paths(
             paths
@@ -337,7 +343,7 @@ mod tests {
         context.touch(&excluded_file);
 
         let mut excluded = HashSet::new();
-        excluded.insert(context.absolute_path_to("excluded"));
+        excluded.insert(context.absolute_path_to("excluded").to_string_lossy().into());
 
         let (files, errors) = collect_document_paths_with_exclusions(&context, &["included", "excluded"], &excluded);
 
@@ -354,7 +360,7 @@ mod tests {
         context.touch(&nested);
 
         let mut excluded = HashSet::new();
-        excluded.insert(context.absolute_path_to("root/skip"));
+        excluded.insert(context.absolute_path_to("root/skip").to_string_lossy().into());
 
         let (files, errors) = collect_document_paths_with_exclusions(&context, &["root"], &excluded);
 
@@ -376,7 +382,7 @@ mod tests {
 
         // Excluding the real directory while requesting to index the symlink should properly exclude the link
         let mut excluded = HashSet::new();
-        excluded.insert(context.absolute_path_to("real_dir"));
+        excluded.insert(context.absolute_path_to("real_dir").to_string_lossy().into());
 
         let (files, errors) = collect_document_paths_with_exclusions(&context, &["included", "link"], &excluded);
 
