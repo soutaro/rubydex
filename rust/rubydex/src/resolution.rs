@@ -36,6 +36,121 @@ impl Outcome {
     }
 }
 
+/// Opt-in profiling for the resolution phase, enabled by setting the `RUBYDEX_RESOLUTION_PROFILE`
+/// environment variable to any value. Prints a phase breakdown to stderr at the end of `resolve()`.
+///
+/// The breakdown is meant to guide performance work (e.g. parallelization) against real
+/// codebases: it shows where resolution time goes per unit kind, how many convergence passes ran,
+/// how much work each pass processed, and how constant references are distributed across parent
+/// scope kinds (references with an `Attached` parent scope require graph mutation to resolve and
+/// cannot take a read-only fast path).
+struct ResolutionProfile {
+    enabled: bool,
+    started_at: std::time::Instant,
+    prepare_depths: std::time::Duration,
+    prepare_classify: std::time::Duration,
+    prepare_sort: std::time::Duration,
+    definitions: std::time::Duration,
+    definition_count: u64,
+    references: std::time::Duration,
+    reference_count: u64,
+    ancestors: std::time::Duration,
+    ancestor_count: u64,
+    remaining_definitions: std::time::Duration,
+    compute_descendants: std::time::Duration,
+    /// (definition, reference, ancestors) unit counts per convergence pass
+    per_pass: Vec<(usize, usize, usize)>,
+}
+
+impl ResolutionProfile {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("RUBYDEX_RESOLUTION_PROFILE").is_some(),
+            started_at: std::time::Instant::now(),
+            prepare_depths: std::time::Duration::ZERO,
+            prepare_classify: std::time::Duration::ZERO,
+            prepare_sort: std::time::Duration::ZERO,
+            definitions: std::time::Duration::ZERO,
+            definition_count: 0,
+            references: std::time::Duration::ZERO,
+            reference_count: 0,
+            ancestors: std::time::Duration::ZERO,
+            ancestor_count: 0,
+            remaining_definitions: std::time::Duration::ZERO,
+            compute_descendants: std::time::Duration::ZERO,
+            per_pass: Vec::new(),
+        }
+    }
+
+    /// Returns the current time when profiling is enabled, to be paired with `record`
+    fn start(&self) -> Option<std::time::Instant> {
+        self.enabled.then(std::time::Instant::now)
+    }
+
+    fn record(bucket: &mut std::time::Duration, started: Option<std::time::Instant>) {
+        if let Some(started) = started {
+            *bucket += started.elapsed();
+        }
+    }
+
+    fn print(&self, graph: &Graph) {
+        if !self.enabled {
+            return;
+        }
+
+        // Distribution of constant references by the parent scope kind of their name. `Attached`
+        // references resolve through singleton class creation, which requires mutating the graph
+        let (mut none, mut top_level, mut some, mut attached) = (0u64, 0u64, 0u64, 0u64);
+        for reference in graph.constant_references().values() {
+            let parent_scope = match graph.names().get(reference.name_id()).unwrap() {
+                NameRef::Resolved(resolved) => *resolved.name().parent_scope(),
+                NameRef::Unresolved(name) => *name.parent_scope(),
+            };
+            match parent_scope {
+                ParentScope::None => none += 1,
+                ParentScope::TopLevel => top_level += 1,
+                ParentScope::Some(_) => some += 1,
+                ParentScope::Attached(_) => attached += 1,
+            }
+        }
+
+        eprintln!("=== rubydex resolution profile ===");
+        eprintln!(
+            "prepare_units:          {:?} (depths: {:?}, classify: {:?}, sort: {:?})",
+            self.prepare_depths + self.prepare_classify + self.prepare_sort,
+            self.prepare_depths,
+            self.prepare_classify,
+            self.prepare_sort
+        );
+        eprintln!(
+            "definition units:       {:?} ({} units)",
+            self.definitions, self.definition_count
+        );
+        eprintln!(
+            "constant ref units:     {:?} ({} units)",
+            self.references, self.reference_count
+        );
+        eprintln!(
+            "ancestors units:        {:?} ({} units)",
+            self.ancestors, self.ancestor_count
+        );
+        eprintln!("remaining definitions:  {:?}", self.remaining_definitions);
+        eprintln!("compute_descendants:    {:?}", self.compute_descendants);
+        eprintln!("total resolve():        {:?}", self.started_at.elapsed());
+        eprintln!("convergence passes:     {}", self.per_pass.len());
+        for (index, (definitions, references, ancestors)) in self.per_pass.iter().enumerate() {
+            eprintln!(
+                "  pass {}: definitions={definitions} references={references} ancestors={ancestors}",
+                index + 1
+            );
+        }
+        eprintln!(
+            "reference parent scopes: none={none} top_level={top_level} scoped={some} attached={attached} (total {})",
+            none + top_level + some + attached
+        );
+    }
+}
+
 struct LinearizationContext {
     seen_ids: IdentityHashSet<DeclarationId>,
     cyclic: bool,
@@ -87,13 +202,15 @@ impl<'a> Resolver<'a> {
     ///
     /// Can panic if there's inconsistent data in the graph
     pub fn resolve(&mut self) {
-        let other_ids = self.prepare_units();
+        let mut profile = ResolutionProfile::new();
+        let other_ids = self.prepare_units(&mut profile);
 
         loop {
             // Flag to ensure the end of the resolution loop. We go through all items in the queue based on its current
             // length. If we made any progress in this pass of the queue, we can continue because we're unlocking more work
             // to be done
             self.made_progress = false;
+            let mut pass_counts = (0usize, 0usize, 0usize);
 
             // Loop through the current length of the queue, which won't change during this pass. Retries pushed to the back
             // are only processed in the next pass, so that we can assess whether we made any progress
@@ -102,18 +219,31 @@ impl<'a> Resolver<'a> {
                     break;
                 };
 
+                let started = profile.start();
+
                 match unit_id {
                     Unit::Definition(id) => {
                         self.handle_definition_unit(unit_id, id);
+                        ResolutionProfile::record(&mut profile.definitions, started);
+                        profile.definition_count += 1;
+                        pass_counts.0 += 1;
                     }
                     Unit::ConstantRef(id) => {
                         self.handle_reference_unit(unit_id, id);
+                        ResolutionProfile::record(&mut profile.references, started);
+                        profile.reference_count += 1;
+                        pass_counts.1 += 1;
                     }
                     Unit::Ancestors(id) => {
                         self.handle_ancestor_unit(id);
+                        ResolutionProfile::record(&mut profile.ancestors, started);
+                        profile.ancestor_count += 1;
+                        pass_counts.2 += 1;
                     }
                 }
             }
+
+            profile.per_pass.push((pass_counts.0, pass_counts.1, pass_counts.2));
 
             if !self.made_progress || self.unit_queue.is_empty() {
                 break;
@@ -127,9 +257,15 @@ impl<'a> Resolver<'a> {
         // they're retried on the next resolve() call.
         self.graph.extend_work(std::mem::take(&mut self.unit_queue));
 
+        let started = profile.start();
         self.handle_remaining_definitions(other_ids);
+        ResolutionProfile::record(&mut profile.remaining_definitions, started);
 
+        let started = profile.start();
         self.compute_descendants();
+        ResolutionProfile::record(&mut profile.compute_descendants, started);
+
+        profile.print(self.graph);
     }
 
     /// Computes descendants for all namespaces by inverting the linearized ancestor chains. Since ancestor chains are
@@ -1896,7 +2032,7 @@ impl<'a> Resolver<'a> {
     /// Namespace definitions and constant references are sorted by name depth for deterministic
     /// resolution order. Non-namespace definitions (methods, attrs, variables) are returned
     /// separately for `handle_remaining_definitions`.
-    fn prepare_units(&mut self) -> Vec<DefinitionId> {
+    fn prepare_units(&mut self, profile: &mut ResolutionProfile) -> Vec<DefinitionId> {
         let work = self.graph.take_pending_work();
         let estimated = work.len() / 2;
         let mut definitions = Vec::with_capacity(estimated);
@@ -1905,7 +2041,11 @@ impl<'a> Resolver<'a> {
         let mut const_refs = Vec::new();
         let mut ancestors = vec![*BASIC_OBJECT_ID, *KERNEL_ID, *OBJECT_ID, *MODULE_ID, *CLASS_ID];
         let names = self.graph.names();
+
+        let started = profile.start();
         let depths = Self::compute_name_depths(names);
+        ResolutionProfile::record(&mut profile.prepare_depths, started);
+        let started = profile.start();
 
         // Dedup: when multiple files are indexed before resolution runs, pending_work accumulates
         // and the same definition/reference ID can be enqueued more than once.
@@ -1978,6 +2118,9 @@ impl<'a> Resolver<'a> {
             }
         }
 
+        ResolutionProfile::record(&mut profile.prepare_classify, started);
+        let started = profile.start();
+
         // Sort namespaces based on their name complexity so that simpler names are always first
         // When the depth is the same, sort by URI and offset to maintain determinism
         definitions.sort_unstable_by(|(_, (name_a, uri_a, offset_a)), (_, (name_b, uri_b, offset_b))| {
@@ -1989,6 +2132,7 @@ impl<'a> Resolver<'a> {
         });
 
         others.sort_unstable_by_key(|(_, key)| *key);
+        ResolutionProfile::record(&mut profile.prepare_sort, started);
 
         // Definitions first, then constant refs, then singleton methods, then ancestors
         self.unit_queue.extend(definitions.into_iter().map(|(id, _)| id));

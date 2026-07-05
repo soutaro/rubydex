@@ -85,6 +85,7 @@ When necessary, commands can be executed for the Rust code.
 - `cargo build`: compiles the Rust code
 - `cargo run -- <directory>`: runs the indexer on the specified directory (must use absolute paths or $HOME, not ~)
 - `cargo run -- <directory> --stats`: runs the indexer with detailed performance breakdown
+- `RUBYDEX_RESOLUTION_PROFILE=1 cargo run --release -- <directory>`: prints a resolution phase breakdown (per unit kind, per convergence pass, reference parent scope distribution) to stderr
 - `cargo run -- <directory> --stop-after <stage>`: stops after the specified stage (Listing, Indexing, or Resolution)
 - `cargo run -- <directory> --visualize`: generates a DOT visualization of the graph
 - `cargo test`: runs Rust tests (all workspace crates)
