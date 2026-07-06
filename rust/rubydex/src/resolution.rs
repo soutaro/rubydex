@@ -208,6 +208,70 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Processes one pass' worth of constant reference units.
+    ///
+    /// Large batches are resolved in parallel: worker threads run the read-only resolution kernel against the
+    /// immutable graph, and the outcomes are applied serially afterwards in batch order, which keeps resolution
+    /// deterministic. References that need to mutate the graph to resolve (`NeedsSerial`) run through the serial
+    /// resolution path during the apply step. Small batches skip the threading overhead entirely
+    fn process_reference_batch(&mut self, batch: Vec<(Unit, ConstantReferenceId)>) {
+        /// Batches smaller than this are processed serially: thread startup costs more than it saves
+        const PARALLEL_THRESHOLD: usize = 4096;
+
+        if batch.len() < PARALLEL_THRESHOLD {
+            for (unit_id, id) in batch {
+                self.handle_reference_unit(unit_id, id);
+            }
+            return;
+        }
+
+        let outcomes = {
+            let graph: &Graph = self.graph;
+            let worker_count = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+            let chunk_size = batch.len().div_ceil(worker_count);
+            let mut outcomes = Vec::with_capacity(batch.len());
+
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            chunk
+                                .iter()
+                                .map(|(_, id)| try_resolve_reference_readonly(graph, *id))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+
+                for handle in handles {
+                    outcomes.extend(handle.join().expect("reference resolution worker panicked"));
+                }
+            });
+
+            outcomes
+        };
+
+        for ((unit_id, id), outcome) in batch.into_iter().zip(outcomes) {
+            match outcome {
+                ReadOutcome::Resolved {
+                    name_id,
+                    declaration_id,
+                } => {
+                    self.graph.record_resolved_name(name_id, declaration_id);
+                    self.graph.record_resolved_reference(id, declaration_id);
+                    self.made_progress = true;
+                }
+                ReadOutcome::Requeue => {
+                    self.unit_queue.push_back(unit_id);
+                }
+                ReadOutcome::NeedsSerial => {
+                    self.handle_reference_unit(unit_id, id);
+                }
+            }
+        }
+    }
+
     /// Runs the resolution phase on the graph. The resolution phase is when 4 main pieces of information are computed:
     ///
     /// 1. Declarations for all definitions
@@ -230,7 +294,14 @@ impl<'a> Resolver<'a> {
             let mut pass_counts = (0usize, 0usize, 0usize);
 
             // Loop through the current length of the queue, which won't change during this pass. Retries pushed to the back
-            // are only processed in the next pass, so that we can assess whether we made any progress
+            // are only processed in the next pass, so that we can assess whether we made any progress.
+            //
+            // Definition and ancestors units are processed serially in queue order. Constant references are collected
+            // into a batch and resolved at the end of the pass, when the pass' definitions and linearizations are
+            // done: reference resolution is read-only for the vast majority of references, so the batch can be
+            // resolved in parallel against the graph
+            let mut reference_batch = Vec::new();
+
             for _ in 0..self.unit_queue.len() {
                 let Some(unit_id) = self.unit_queue.pop_front() else {
                     break;
@@ -246,10 +317,7 @@ impl<'a> Resolver<'a> {
                         pass_counts.0 += 1;
                     }
                     Unit::ConstantRef(id) => {
-                        self.handle_reference_unit(unit_id, id);
-                        ResolutionProfile::record(&mut profile.references, started);
-                        profile.reference_count += 1;
-                        pass_counts.1 += 1;
+                        reference_batch.push((unit_id, id));
                     }
                     Unit::Ancestors(id) => {
                         self.queued_ancestors.remove(&id);
@@ -260,6 +328,13 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
+
+            let started = profile.start();
+            let batch_len = reference_batch.len();
+            self.process_reference_batch(reference_batch);
+            ResolutionProfile::record(&mut profile.references, started);
+            profile.reference_count += batch_len as u64;
+            pass_counts.1 += batch_len;
 
             profile.per_pass.push((pass_counts.0, pass_counts.1, pass_counts.2));
 
@@ -1810,14 +1885,7 @@ impl<'a> Resolver<'a> {
     /// chain and returns the first namespace found. Returns `None` for all other declaration types or unresolved alias
     /// chains.
     fn resolve_to_namespace(&self, declaration_id: DeclarationId) -> Option<DeclarationId> {
-        match self.graph.declarations().get(&declaration_id)? {
-            Declaration::Namespace(_) => Some(declaration_id),
-            Declaration::ConstantAlias(_) => self
-                .resolve_alias_chains(declaration_id)
-                .into_iter()
-                .find(|id| self.graph.is_namespace(id)),
-            _ => None,
-        }
+        resolve_to_namespace(self.graph, declaration_id)
     }
 
     /// Resolves an alias chain to get all possible final target declarations.
@@ -1826,39 +1894,7 @@ impl<'a> Resolver<'a> {
     /// When an alias has multiple definitions with different targets (e.g., conditional assignment),
     /// this returns all possible final targets.
     fn resolve_alias_chains(&self, declaration_id: DeclarationId) -> Vec<DeclarationId> {
-        let mut results = Vec::new();
-        let mut queue = VecDeque::from([declaration_id]);
-        let mut seen = HashSet::new();
-
-        // Use BFS (pop_front) to preserve the order of alias targets.
-        // The first target of an alias should remain the first/primary result.
-        while let Some(current) = queue.pop_front() {
-            if !seen.insert(current) {
-                // Already processed or cycle detected
-                continue;
-            }
-
-            match self.graph.declarations().get(&current) {
-                Some(Declaration::ConstantAlias(_)) => {
-                    let targets = self.graph.alias_targets(&current).unwrap_or_default();
-                    if targets.is_empty() {
-                        // Target not resolved yet, keep the alias for retry
-                        results.push(current);
-                    } else {
-                        queue.extend(targets);
-                    }
-                }
-                Some(_) => {
-                    // Not an alias, this is a final target
-                    results.push(current);
-                }
-                None => {
-                    panic!("Declaration {current:?} not found in graph");
-                }
-            }
-        }
-
-        results
+        resolve_alias_chains(self.graph, declaration_id)
     }
 
     fn run_resolution(&mut self, name: &Name) -> Outcome {
@@ -2019,26 +2055,7 @@ impl<'a> Resolver<'a> {
 
     /// Look for the constant in the lexical scopes that are a part of its nesting
     fn search_lexical_scopes(&self, name: &Name, str_id: StringId) -> Outcome {
-        let mut current_name = name;
-
-        while let Some(nesting_id) = current_name.nesting() {
-            if let NameRef::Resolved(nesting_name_ref) = self.graph.names().get(nesting_id).unwrap() {
-                let declaration_id = *nesting_name_ref.declaration_id();
-
-                if let Some(namespace_id) = self.resolve_to_namespace(declaration_id)
-                    && let Some(namespace) = self.graph.declarations().get(&namespace_id).unwrap().as_namespace()
-                    && let Some(member) = namespace.member(&str_id)
-                {
-                    return Outcome::Resolved(*member, None);
-                }
-
-                current_name = nesting_name_ref.name();
-            } else {
-                return Outcome::Retry(None);
-            }
-        }
-
-        Outcome::Unresolved(None)
+        search_lexical_scopes(self.graph, name, str_id)
     }
 
     /// Returns a complexity score for a given name, which is used to sort names for resolution. The complexity is based
@@ -2365,6 +2382,285 @@ impl<'a> Resolver<'a> {
             _ => None,
         }
     }
+}
+
+/// Outcome of a read-only resolution attempt for a constant reference. Read-only attempts run in parallel against an
+/// immutable graph snapshot; the writes they describe are applied serially afterwards
+enum ReadOutcome {
+    /// The reference resolves to this declaration. Recording the resolved name and reference happens during the
+    /// serial apply step
+    Resolved {
+        name_id: NameId,
+        declaration_id: DeclarationId,
+    },
+    /// Dependencies are missing (unresolved names or unknown members); retry on a later pass
+    Requeue,
+    /// Resolving requires mutating the graph (linearizing a chain, creating a singleton class, promoting a constant),
+    /// so the serial resolution path must handle this reference
+    NeedsSerial,
+}
+
+/// Result of searching a declaration's ancestor chain without mutating the graph
+enum ReadSearch {
+    Found(DeclarationId),
+    NotFound,
+    /// The chain isn't fully linearized, which only the serial (mutating) path can do
+    Incomplete,
+}
+
+/// Read-only mirror of `Resolver::search_ancestors`: searches a declaration's ancestor chain for a member, but never
+/// linearizes. Must stay in sync with the serial implementation
+fn read_search_ancestors(graph: &Graph, declaration_id: DeclarationId, str_id: StringId) -> ReadSearch {
+    let namespace = graph
+        .declarations()
+        .get(&declaration_id)
+        .unwrap()
+        .as_namespace()
+        .unwrap();
+
+    if !namespace.has_complete_ancestors() {
+        return ReadSearch::Incomplete;
+    }
+
+    for ancestor in namespace.ancestors() {
+        if let Ancestor::Complete(ancestor_id) = ancestor
+            && let Some(member) = graph
+                .declarations()
+                .get(ancestor_id)
+                .unwrap()
+                .as_namespace()
+                .unwrap()
+                .member(&str_id)
+        {
+            return ReadSearch::Found(*member);
+        }
+    }
+
+    ReadSearch::NotFound
+}
+
+/// Read-only mirror of `Resolver::resolve_constant_internal` for constant references. Where the serial version would
+/// mutate the graph, this returns `NeedsSerial`; where it would retry, this returns `Requeue`. Must stay in sync with
+/// the serial implementation
+fn try_resolve_reference_readonly(graph: &Graph, id: ConstantReferenceId) -> ReadOutcome {
+    let constant_ref = graph.constant_references().get(&id).unwrap();
+    let name_id = *constant_ref.name_id();
+
+    let name = match graph.names().get(&name_id).unwrap() {
+        NameRef::Resolved(resolved) => {
+            return ReadOutcome::Resolved {
+                name_id,
+                declaration_id: *resolved.declaration_id(),
+            };
+        }
+        NameRef::Unresolved(name) => name,
+    };
+
+    match name.parent_scope() {
+        ParentScope::TopLevel => match read_search_ancestors(graph, *OBJECT_ID, *name.str()) {
+            ReadSearch::Found(declaration_id) => ReadOutcome::Resolved {
+                name_id,
+                declaration_id,
+            },
+            ReadSearch::NotFound => ReadOutcome::Requeue,
+            ReadSearch::Incomplete => ReadOutcome::NeedsSerial,
+        },
+        // Attached references create singleton classes when they resolve
+        ParentScope::Attached(_) => ReadOutcome::NeedsSerial,
+        ParentScope::None => read_run_resolution(graph, name_id, name),
+        ParentScope::Some(parent_scope_id) => {
+            let NameRef::Resolved(parent_scope) = graph.names().get(parent_scope_id).unwrap() else {
+                return ReadOutcome::Requeue;
+            };
+
+            let resolved_ids = resolve_alias_chains(graph, *parent_scope.declaration_id());
+
+            for target_id in resolved_ids {
+                match graph.declarations().get(&target_id) {
+                    // Alias not fully resolved yet
+                    Some(Declaration::ConstantAlias(_)) => return ReadOutcome::Requeue,
+                    Some(Declaration::Namespace(_)) => match read_search_ancestors(graph, target_id, *name.str()) {
+                        ReadSearch::Found(declaration_id) => {
+                            return ReadOutcome::Resolved {
+                                name_id,
+                                declaration_id,
+                            };
+                        }
+                        // The serial version records the incomplete chain for linearization and keeps searching the
+                        // remaining targets; hand the whole reference to it
+                        ReadSearch::Incomplete => return ReadOutcome::NeedsSerial,
+                        ReadSearch::NotFound => {}
+                    },
+                    // Not a namespace (e.g., a constant) - skip
+                    _ => {}
+                }
+            }
+
+            // No namespace target (serial: Unresolved) or member not found anywhere yet (serial: Retry) — both requeue
+            ReadOutcome::Requeue
+        }
+    }
+}
+
+/// Read-only mirror of `Resolver::run_resolution`. Must stay in sync with the serial implementation
+fn read_run_resolution(graph: &Graph, name_id: NameId, name: &Name) -> ReadOutcome {
+    let str_id = *name.str();
+
+    if let Some(nesting) = name.nesting() {
+        match search_lexical_scopes(graph, name, str_id) {
+            Outcome::Resolved(declaration_id, _) => {
+                return ReadOutcome::Resolved {
+                    name_id,
+                    declaration_id,
+                };
+            }
+            Outcome::Retry(_) => return ReadOutcome::Requeue,
+            Outcome::Unresolved(_) => {}
+        }
+
+        let (ancestor_search, nesting_decl_id) = match graph.names().get(nesting).unwrap() {
+            NameRef::Resolved(nesting_name_ref) => {
+                let resolved_ids = resolve_alias_chains(graph, *nesting_name_ref.declaration_id());
+                let mut search = ReadSearch::NotFound;
+                let mut decl_id = None;
+
+                for target_id in resolved_ids {
+                    match graph.declarations().get(&target_id) {
+                        Some(Declaration::ConstantAlias(_)) => return ReadOutcome::Requeue,
+                        Some(Declaration::Namespace(_)) => {
+                            decl_id = Some(target_id);
+                            search = read_search_ancestors(graph, target_id, str_id);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+
+                (search, decl_id)
+            }
+            NameRef::Unresolved(_) => return ReadOutcome::Requeue,
+        };
+
+        return match ancestor_search {
+            ReadSearch::Found(declaration_id) => ReadOutcome::Resolved {
+                name_id,
+                declaration_id,
+            },
+            // The serial version resolves tentatively through Object's ancestors while the chain is incomplete
+            ReadSearch::Incomplete => ReadOutcome::NeedsSerial,
+            ReadSearch::NotFound => {
+                // Modules don't inherit from Object, but Ruby gives them a special fallback to Object's ancestors
+                let is_module = nesting_decl_id.is_some_and(|target_id| {
+                    matches!(
+                        graph.declarations().get(&target_id),
+                        Some(Declaration::Namespace(Namespace::Module(_) | Namespace::Todo(_)))
+                    )
+                });
+
+                if is_module {
+                    match read_search_ancestors(graph, *OBJECT_ID, str_id) {
+                        ReadSearch::Found(declaration_id) => ReadOutcome::Resolved {
+                            name_id,
+                            declaration_id,
+                        },
+                        ReadSearch::NotFound => ReadOutcome::Requeue,
+                        ReadSearch::Incomplete => ReadOutcome::NeedsSerial,
+                    }
+                } else {
+                    ReadOutcome::Requeue
+                }
+            }
+        };
+    }
+
+    // When there's no nesting, we're working at the top level of a script, which resolves through the ancestors of
+    // `Object`
+    match read_search_ancestors(graph, *OBJECT_ID, str_id) {
+        ReadSearch::Found(declaration_id) => ReadOutcome::Resolved {
+            name_id,
+            declaration_id,
+        },
+        ReadSearch::NotFound => ReadOutcome::Requeue,
+        ReadSearch::Incomplete => ReadOutcome::NeedsSerial,
+    }
+}
+
+/// If `declaration_id` is already a namespace, returns it directly. If it's a `ConstantAlias`, follows the alias
+/// chain and returns the first namespace found. Returns `None` for all other declaration types or unresolved alias
+/// chains.
+fn resolve_to_namespace(graph: &Graph, declaration_id: DeclarationId) -> Option<DeclarationId> {
+    match graph.declarations().get(&declaration_id)? {
+        Declaration::Namespace(_) => Some(declaration_id),
+        Declaration::ConstantAlias(_) => resolve_alias_chains(graph, declaration_id)
+            .into_iter()
+            .find(|id| graph.is_namespace(id)),
+        _ => None,
+    }
+}
+
+/// Resolves an alias chain to get all possible final target declarations.
+/// Returns the original ID if it's not an alias or if the target hasn't been resolved yet.
+///
+/// When an alias has multiple definitions with different targets (e.g., conditional assignment),
+/// this returns all possible final targets.
+fn resolve_alias_chains(graph: &Graph, declaration_id: DeclarationId) -> Vec<DeclarationId> {
+    let mut results = Vec::new();
+    let mut queue = VecDeque::from([declaration_id]);
+    let mut seen = HashSet::new();
+
+    // Use BFS (pop_front) to preserve the order of alias targets.
+    // The first target of an alias should remain the first/primary result.
+    while let Some(current) = queue.pop_front() {
+        if !seen.insert(current) {
+            // Already processed or cycle detected
+            continue;
+        }
+
+        match graph.declarations().get(&current) {
+            Some(Declaration::ConstantAlias(_)) => {
+                let targets = graph.alias_targets(&current).unwrap_or_default();
+                if targets.is_empty() {
+                    // Target not resolved yet, keep the alias for retry
+                    results.push(current);
+                } else {
+                    queue.extend(targets);
+                }
+            }
+            Some(_) => {
+                // Not an alias, this is a final target
+                results.push(current);
+            }
+            None => {
+                panic!("Declaration {current:?} not found in graph");
+            }
+        }
+    }
+
+    results
+}
+
+/// Look for the constant in the lexical scopes that are a part of its nesting
+fn search_lexical_scopes(graph: &Graph, name: &Name, str_id: StringId) -> Outcome {
+    let mut current_name = name;
+
+    while let Some(nesting_id) = current_name.nesting() {
+        if let NameRef::Resolved(nesting_name_ref) = graph.names().get(nesting_id).unwrap() {
+            let declaration_id = *nesting_name_ref.declaration_id();
+
+            if let Some(namespace_id) = resolve_to_namespace(graph, declaration_id)
+                && let Some(namespace) = graph.declarations().get(&namespace_id).unwrap().as_namespace()
+                && let Some(member) = namespace.member(&str_id)
+            {
+                return Outcome::Resolved(*member, None);
+            }
+
+            current_name = nesting_name_ref.name();
+        } else {
+            return Outcome::Retry(None);
+        }
+    }
+
+    Outcome::Unresolved(None)
 }
 
 #[cfg(test)]
