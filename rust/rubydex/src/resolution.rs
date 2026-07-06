@@ -54,6 +54,8 @@ struct ResolutionProfile {
     definition_count: u64,
     references: std::time::Duration,
     reference_count: u64,
+    reference_compute: std::time::Duration,
+    reference_apply: std::time::Duration,
     ancestors: std::time::Duration,
     ancestor_count: u64,
     remaining_definitions: std::time::Duration,
@@ -74,6 +76,8 @@ impl ResolutionProfile {
             definition_count: 0,
             references: std::time::Duration::ZERO,
             reference_count: 0,
+            reference_compute: std::time::Duration::ZERO,
+            reference_apply: std::time::Duration::ZERO,
             ancestors: std::time::Duration::ZERO,
             ancestor_count: 0,
             remaining_definitions: std::time::Duration::ZERO,
@@ -129,6 +133,10 @@ impl ResolutionProfile {
         eprintln!(
             "constant ref units:     {:?} ({} units)",
             self.references, self.reference_count
+        );
+        eprintln!(
+            "  parallel compute:     {:?} / serial apply: {:?} (rest is serial-path waves)",
+            self.reference_compute, self.reference_apply
         );
         eprintln!(
             "ancestors units:        {:?} ({} units)",
@@ -219,8 +227,8 @@ impl<'a> Resolver<'a> {
     /// immutable graph, and the outcomes are applied serially afterwards in batch order, which keeps resolution
     /// deterministic. References that need to mutate the graph to resolve (`NeedsSerial`) run through the serial
     /// resolution path during the apply step. Small batches skip the threading overhead entirely
-    fn process_reference_batch(&mut self, batch: Vec<(Unit, ConstantReferenceId)>) {
-        if batch.len() < PARALLEL_THRESHOLD {
+    fn process_reference_batch(&mut self, batch: Vec<(Unit, ConstantReferenceId)>, profile: &mut ResolutionProfile) {
+        if batch.len() < PARALLEL_THRESHOLD || sequential_references_forced() {
             for (unit_id, id) in batch {
                 self.handle_reference_unit(unit_id, id);
             }
@@ -249,19 +257,25 @@ impl<'a> Resolver<'a> {
             let wave_end = rest.partition_point(|(d, ..)| *d == depth);
             let (wave, remaining) = rest.split_at(wave_end);
             rest = remaining;
-            self.process_reference_wave(wave);
+            self.process_reference_wave(wave, profile);
         }
     }
 
     /// Resolves one same-depth wave of constant references: read-only parallel resolution of the wave's unique names
     /// against the immutable graph, followed by a serial apply of the outcomes in wave order
-    fn process_reference_wave(&mut self, wave: &[(u32, Unit, ConstantReferenceId, NameId)]) {
+    fn process_reference_wave(
+        &mut self,
+        wave: &[(u32, Unit, ConstantReferenceId, NameId)],
+        profile: &mut ResolutionProfile,
+    ) {
         if wave.len() < PARALLEL_THRESHOLD {
             for (_, unit_id, id, _) in wave {
                 self.handle_reference_unit(*unit_id, *id);
             }
             return;
         }
+
+        let compute_started = profile.start();
 
         // Resolution depends only on the name, and many references share a name (every call site of `Foo.bar` in
         // the same lexical context reuses the same name), so run the kernel once per unique name and fan the outcome
@@ -311,12 +325,21 @@ impl<'a> Resolver<'a> {
             outcomes
         };
 
+        ResolutionProfile::record(&mut profile.reference_compute, compute_started);
+        let apply_started = profile.start();
+
+        // Resolved names are recorded once per unique name instead of once per reference
+        for name_id in &unique_names {
+            if let ReadOutcome::Resolved { declaration_id } = outcomes.get(name_id).unwrap() {
+                self.graph.record_resolved_name(*name_id, *declaration_id);
+                self.made_progress = true;
+            }
+        }
+
         for (_, unit_id, id, name_id) in wave {
             match *outcomes.get(name_id).unwrap() {
                 ReadOutcome::Resolved { declaration_id } => {
-                    self.graph.record_resolved_name(*name_id, declaration_id);
                     self.graph.record_resolved_reference(*id, declaration_id);
-                    self.made_progress = true;
                 }
                 ReadOutcome::Requeue => {
                     self.unit_queue.push_back(*unit_id);
@@ -329,6 +352,8 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
+
+        ResolutionProfile::record(&mut profile.reference_apply, apply_started);
     }
 
     /// Runs the resolution phase on the graph. The resolution phase is when 4 main pieces of information are computed:
@@ -390,7 +415,7 @@ impl<'a> Resolver<'a> {
 
             let started = profile.start();
             let batch_len = reference_batch.len();
-            self.process_reference_batch(reference_batch);
+            self.process_reference_batch(reference_batch, &mut profile);
             ResolutionProfile::record(&mut profile.references, started);
             profile.reference_count += batch_len as u64;
             pass_counts.1 += batch_len;
@@ -2446,6 +2471,13 @@ impl<'a> Resolver<'a> {
 
 /// Reference batches and waves smaller than this are processed serially: thread startup costs more than it saves
 const PARALLEL_THRESHOLD: usize = 4096;
+
+/// Returns true when the `RUBYDEX_SEQUENTIAL_REFERENCES` environment variable is set, which forces reference
+/// resolution through the serial path. Useful for A/B benchmarking the parallel path on the same machine state
+fn sequential_references_forced() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| std::env::var_os("RUBYDEX_SEQUENTIAL_REFERENCES").is_some())
+}
 
 /// Outcome of a read-only resolution attempt for a constant name. Read-only attempts run in parallel against an
 /// immutable graph snapshot; the writes they describe are applied serially afterwards
