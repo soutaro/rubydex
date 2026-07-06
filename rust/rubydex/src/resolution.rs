@@ -180,6 +180,12 @@ pub struct Resolver<'a> {
     unit_queue: VecDeque<Unit>,
     /// Whether we made any progress in the last pass of the resolution loop
     made_progress: bool,
+    /// Declarations that currently have an ancestors linearization unit in `unit_queue`, used to avoid enqueueing
+    /// duplicate units for the same declaration
+    queued_ancestors: IdentityHashSet<DeclarationId>,
+    /// Declarations that gained a definition (or were promoted) after their ancestor chain was last built. Their
+    /// mixins/superclass may have changed, so cached partial chains and the blocked-chain skip must not apply
+    dirty_chains: IdentityHashSet<DeclarationId>,
 }
 
 impl<'a> Resolver<'a> {
@@ -188,6 +194,17 @@ impl<'a> Resolver<'a> {
             graph,
             unit_queue: VecDeque::new(),
             made_progress: false,
+            queued_ancestors: IdentityHashSet::default(),
+            dirty_chains: IdentityHashSet::default(),
+        }
+    }
+
+    /// Enqueues an ancestors linearization unit for the given declaration unless one is already queued. Linearization
+    /// units are requested per definition and per blocked reference, so on large graphs the same declaration gets
+    /// requested many times per pass — processing it once per pass is enough
+    fn enqueue_ancestors(&mut self, declaration_id: DeclarationId) {
+        if self.queued_ancestors.insert(declaration_id) {
+            self.unit_queue.push_back(Unit::Ancestors(declaration_id));
         }
     }
 
@@ -235,6 +252,7 @@ impl<'a> Resolver<'a> {
                         pass_counts.1 += 1;
                     }
                     Unit::Ancestors(id) => {
+                        self.queued_ancestors.remove(&id);
                         self.handle_ancestor_unit(id);
                         ResolutionProfile::record(&mut profile.ancestors, started);
                         profile.ancestor_count += 1;
@@ -392,16 +410,22 @@ impl<'a> Resolver<'a> {
             }
             Outcome::Retry(Some(id_needing_linearization)) | Outcome::Unresolved(Some(id_needing_linearization)) => {
                 self.unit_queue.push_back(unit_id);
-                self.unit_queue.push_back(Unit::Ancestors(id_needing_linearization));
+                self.enqueue_ancestors(id_needing_linearization);
             }
             Outcome::Resolved(id, None) => {
                 if needs_linearization {
-                    self.unit_queue.push_back(Unit::Ancestors(id));
+                    self.dirty_chains.insert(id);
+                    self.enqueue_ancestors(id);
                 }
                 self.made_progress = true;
             }
-            Outcome::Resolved(_, Some(id_needing_linearization)) => {
-                self.unit_queue.push_back(Unit::Ancestors(id_needing_linearization));
+            Outcome::Resolved(id, Some(id_needing_linearization)) => {
+                if needs_linearization {
+                    // A new definition landed on this declaration, so a previously built (partial) chain may be
+                    // missing mixins or a superclass from it
+                    self.dirty_chains.insert(id);
+                }
+                self.enqueue_ancestors(id_needing_linearization);
                 self.made_progress = true;
             }
         }
@@ -420,7 +444,7 @@ impl<'a> Resolver<'a> {
             }
             Outcome::Retry(Some(id_needing_linearization)) | Outcome::Unresolved(Some(id_needing_linearization)) => {
                 self.unit_queue.push_back(unit_id);
-                self.unit_queue.push_back(Unit::Ancestors(id_needing_linearization));
+                self.enqueue_ancestors(id_needing_linearization);
             }
             Outcome::Resolved(declaration_id, None) => {
                 self.graph.record_resolved_reference(id, declaration_id);
@@ -429,9 +453,44 @@ impl<'a> Resolver<'a> {
             Outcome::Resolved(resolved_id, Some(id_needing_linearization)) => {
                 self.graph.record_resolved_reference(id, resolved_id);
                 self.made_progress = true;
-                self.unit_queue.push_back(Unit::Ancestors(id_needing_linearization));
+                self.enqueue_ancestors(id_needing_linearization);
             }
         }
+    }
+
+    /// Returns true when the declaration's partial ancestor chain is still blocked on the exact same dependencies it
+    /// was built against, meaning a rebuild is guaranteed to reproduce the identical chain.
+    ///
+    /// A partial chain records which unresolved names block it as `Ancestor::Partial` entries (blockers of partially
+    /// linearized parents and mixins get inlined into the chain too). The chain only needs to be rebuilt when one of
+    /// those names has since been resolved, or when the declaration gained a new definition (dirty), which can add
+    /// mixins or a superclass. Chains without recorded blockers (never linearized, or partial through a singleton's
+    /// attached class) always report false so they are conservatively rebuilt
+    fn partial_chain_still_blocked(&self, declaration_id: DeclarationId) -> bool {
+        if self.dirty_chains.contains(&declaration_id) {
+            return false;
+        }
+
+        let namespace = self
+            .graph
+            .declarations()
+            .get(&declaration_id)
+            .unwrap()
+            .as_namespace()
+            .unwrap();
+        let mut has_blockers = false;
+
+        for ancestor in namespace.ancestors() {
+            if let Ancestor::Partial(name_id) = ancestor {
+                has_blockers = true;
+
+                if matches!(self.graph.names().get(name_id), Some(NameRef::Resolved(_))) {
+                    return false;
+                }
+            }
+        }
+
+        has_blockers
     }
 
     /// Handles a unit of work for linearizing ancestors of a declaration
@@ -451,6 +510,13 @@ impl<'a> Resolver<'a> {
             return;
         }
 
+        // If the chain is still blocked on the exact dependencies it was built against, rebuilding it would
+        // reproduce the identical partial chain — keep waiting instead
+        if self.partial_chain_still_blocked(id) {
+            self.enqueue_ancestors(id);
+            return;
+        }
+
         match self.ancestors_of(id) {
             Ancestors::Complete(_) | Ancestors::Cyclic(_) => {
                 // We succeeded in some capacity this time
@@ -459,7 +525,7 @@ impl<'a> Resolver<'a> {
             Ancestors::Partial(_) => {
                 // We still couldn't linearize ancestors, but there's a chance that this will succeed next time. We
                 // re-enqueue for another try, but we don't consider it as making progress
-                self.unit_queue.push_back(Unit::Ancestors(id));
+                self.enqueue_ancestors(id);
             }
         }
     }
@@ -1061,11 +1127,12 @@ impl<'a> Resolver<'a> {
                 self.graph.promote_constant_to_namespace(attached_id, |name, owner_id| {
                     Declaration::Namespace(Namespace::Module(Box::new(ModuleDeclaration::new(name, owner_id))))
                 });
+                self.dirty_chains.insert(attached_id);
 
                 if eager_ancestors {
                     let _ = self.ancestors_of(attached_id);
                 } else {
-                    self.unit_queue.push_back(Unit::Ancestors(attached_id));
+                    self.enqueue_ancestors(attached_id);
                 }
             } else {
                 return None;
@@ -1097,7 +1164,7 @@ impl<'a> Resolver<'a> {
         if eager_ancestors {
             let _ = self.ancestors_of(decl_id);
         } else {
-            self.unit_queue.push_back(Unit::Ancestors(decl_id));
+            self.enqueue_ancestors(decl_id);
         }
 
         Some(decl_id)
@@ -1122,16 +1189,37 @@ impl<'a> Resolver<'a> {
     #[must_use]
     fn linearize_ancestors(&mut self, declaration_id: DeclarationId, context: &mut LinearizationContext) -> Ancestors {
         {
-            let declaration = self.graph.declarations_mut().get_mut(&declaration_id).unwrap();
+            let declaration = self.graph.declarations().get(&declaration_id).unwrap();
 
-            // Return the cached ancestors if we already computed them. If they are partial ancestors, ignore the cache to try
-            // again
+            // Return the cached ancestors if we already computed them. If they are partial ancestors, they are only
+            // reusable while still blocked on the exact same dependencies they were built against
             if declaration.as_namespace().unwrap().has_complete_ancestors() {
                 let cached = declaration.as_namespace().unwrap().clone_ancestors();
 
                 context.finalize(declaration_id);
                 return cached;
             }
+        }
+
+        // Reuse a partial chain that is still blocked on the same unresolved names it was built against: rebuilding
+        // it would walk the same graph state and produce the identical chain
+        if self.partial_chain_still_blocked(declaration_id) {
+            let cached = self
+                .graph
+                .declarations()
+                .get(&declaration_id)
+                .unwrap()
+                .as_namespace()
+                .unwrap()
+                .clone_ancestors();
+
+            context.partial = true;
+            context.finalize(declaration_id);
+            return cached;
+        }
+
+        {
+            let declaration = self.graph.declarations_mut().get_mut(&declaration_id).unwrap();
 
             if !context.seen_ids.insert(declaration_id) {
                 // If we find a cycle when linearizing ancestors, it's an error that the programmer must fix. However, we try to
@@ -1219,6 +1307,8 @@ impl<'a> Resolver<'a> {
             .as_namespace_mut()
             .unwrap()
             .set_ancestors(result.clone());
+
+        self.dirty_chains.remove(&declaration_id);
 
         context.finalize(declaration_id);
         result
@@ -1428,7 +1518,8 @@ impl<'a> Resolver<'a> {
                         self.graph.promote_constant_to_namespace(owner_id, |name, owner_id| {
                             Declaration::Namespace(Namespace::Module(Box::new(ModuleDeclaration::new(name, owner_id))))
                         });
-                        self.unit_queue.push_back(Unit::Ancestors(owner_id));
+                        self.dirty_chains.insert(owner_id);
+                        self.enqueue_ancestors(owner_id);
                     }
                 }
 
@@ -2138,6 +2229,7 @@ impl<'a> Resolver<'a> {
         self.unit_queue.extend(definitions.into_iter().map(|(id, _)| id));
         self.unit_queue.extend(const_refs.into_iter().map(|(id, _)| id));
         self.unit_queue.extend(singleton_methods);
+        self.queued_ancestors.extend(ancestors.iter().copied());
         self.unit_queue.extend(ancestors.into_iter().map(Unit::Ancestors));
 
         others.into_iter().map(|(id, _)| id).collect()
