@@ -225,39 +225,61 @@ impl<'a> Resolver<'a> {
             return;
         }
 
+        // Resolution depends only on the name, and many references share a name (every call site of `Foo.bar` in
+        // the same lexical context reuses the same name), so run the kernel once per unique name and fan the outcome
+        // out to all references sharing it
+        let mut refs = Vec::with_capacity(batch.len());
+        let mut seen_names = IdentityHashSet::<NameId>::default();
+        let mut unique_names = Vec::new();
+
+        for (unit_id, id) in batch {
+            let name_id = *self.graph.constant_references().get(&id).unwrap().name_id();
+            refs.push((unit_id, id, name_id));
+
+            if seen_names.insert(name_id) {
+                unique_names.push(name_id);
+            }
+        }
+
         let outcomes = {
             let graph: &Graph = self.graph;
             let worker_count = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
-            let chunk_size = batch.len().div_ceil(worker_count);
-            let mut outcomes = Vec::with_capacity(batch.len());
+            let chunk_size = unique_names.len().div_ceil(worker_count);
+            let mut outcomes = IdentityHashMap::<NameId, ReadOutcome>::with_capacity_and_hasher(
+                unique_names.len(),
+                IdentityHashBuilder,
+            );
 
             std::thread::scope(|scope| {
-                let handles: Vec<_> = batch
+                let handles: Vec<_> = unique_names
                     .chunks(chunk_size)
                     .map(|chunk| {
                         scope.spawn(move || {
                             chunk
                                 .iter()
-                                .map(|(_, id)| try_resolve_reference_readonly(graph, *id))
+                                .map(|name_id| try_resolve_name_readonly(graph, *name_id))
                                 .collect::<Vec<_>>()
                         })
                     })
                     .collect();
 
+                let mut chunks = unique_names.chunks(chunk_size);
+
                 for handle in handles {
-                    outcomes.extend(handle.join().expect("reference resolution worker panicked"));
+                    let chunk = chunks.next().unwrap();
+
+                    for (name_id, outcome) in chunk.iter().zip(handle.join().expect("resolution worker panicked")) {
+                        outcomes.insert(*name_id, outcome);
+                    }
                 }
             });
 
             outcomes
         };
 
-        for ((unit_id, id), outcome) in batch.into_iter().zip(outcomes) {
-            match outcome {
-                ReadOutcome::Resolved {
-                    name_id,
-                    declaration_id,
-                } => {
+        for (unit_id, id, name_id) in refs {
+            match *outcomes.get(&name_id).unwrap() {
+                ReadOutcome::Resolved { declaration_id } => {
                     self.graph.record_resolved_name(name_id, declaration_id);
                     self.graph.record_resolved_reference(id, declaration_id);
                     self.made_progress = true;
@@ -265,6 +287,9 @@ impl<'a> Resolver<'a> {
                 ReadOutcome::Requeue => {
                     self.unit_queue.push_back(unit_id);
                 }
+                // The first reference with this name resolves it through the serial path (creating singleton classes
+                // or linearizing chains as needed); later references with the same name then hit the resolved-name
+                // fast path inside the serial resolver
                 ReadOutcome::NeedsSerial => {
                     self.handle_reference_unit(unit_id, id);
                 }
@@ -2384,15 +2409,13 @@ impl<'a> Resolver<'a> {
     }
 }
 
-/// Outcome of a read-only resolution attempt for a constant reference. Read-only attempts run in parallel against an
+/// Outcome of a read-only resolution attempt for a constant name. Read-only attempts run in parallel against an
 /// immutable graph snapshot; the writes they describe are applied serially afterwards
+#[derive(Clone, Copy)]
 enum ReadOutcome {
-    /// The reference resolves to this declaration. Recording the resolved name and reference happens during the
+    /// The name resolves to this declaration. Recording the resolved name and references happens during the
     /// serial apply step
-    Resolved {
-        name_id: NameId,
-        declaration_id: DeclarationId,
-    },
+    Resolved { declaration_id: DeclarationId },
     /// Dependencies are missing (unresolved names or unknown members); retry on a later pass
     Requeue,
     /// Resolving requires mutating the graph (linearizing a chain, creating a singleton class, promoting a constant),
@@ -2439,17 +2462,13 @@ fn read_search_ancestors(graph: &Graph, declaration_id: DeclarationId, str_id: S
     ReadSearch::NotFound
 }
 
-/// Read-only mirror of `Resolver::resolve_constant_internal` for constant references. Where the serial version would
+/// Read-only mirror of `Resolver::resolve_constant_internal` for constant names. Where the serial version would
 /// mutate the graph, this returns `NeedsSerial`; where it would retry, this returns `Requeue`. Must stay in sync with
 /// the serial implementation
-fn try_resolve_reference_readonly(graph: &Graph, id: ConstantReferenceId) -> ReadOutcome {
-    let constant_ref = graph.constant_references().get(&id).unwrap();
-    let name_id = *constant_ref.name_id();
-
+fn try_resolve_name_readonly(graph: &Graph, name_id: NameId) -> ReadOutcome {
     let name = match graph.names().get(&name_id).unwrap() {
         NameRef::Resolved(resolved) => {
             return ReadOutcome::Resolved {
-                name_id,
                 declaration_id: *resolved.declaration_id(),
             };
         }
@@ -2458,16 +2477,13 @@ fn try_resolve_reference_readonly(graph: &Graph, id: ConstantReferenceId) -> Rea
 
     match name.parent_scope() {
         ParentScope::TopLevel => match read_search_ancestors(graph, *OBJECT_ID, *name.str()) {
-            ReadSearch::Found(declaration_id) => ReadOutcome::Resolved {
-                name_id,
-                declaration_id,
-            },
+            ReadSearch::Found(declaration_id) => ReadOutcome::Resolved { declaration_id },
             ReadSearch::NotFound => ReadOutcome::Requeue,
             ReadSearch::Incomplete => ReadOutcome::NeedsSerial,
         },
         // Attached references create singleton classes when they resolve
         ParentScope::Attached(_) => ReadOutcome::NeedsSerial,
-        ParentScope::None => read_run_resolution(graph, name_id, name),
+        ParentScope::None => read_run_resolution(graph, name),
         ParentScope::Some(parent_scope_id) => {
             let NameRef::Resolved(parent_scope) = graph.names().get(parent_scope_id).unwrap() else {
                 return ReadOutcome::Requeue;
@@ -2481,10 +2497,7 @@ fn try_resolve_reference_readonly(graph: &Graph, id: ConstantReferenceId) -> Rea
                     Some(Declaration::ConstantAlias(_)) => return ReadOutcome::Requeue,
                     Some(Declaration::Namespace(_)) => match read_search_ancestors(graph, target_id, *name.str()) {
                         ReadSearch::Found(declaration_id) => {
-                            return ReadOutcome::Resolved {
-                                name_id,
-                                declaration_id,
-                            };
+                            return ReadOutcome::Resolved { declaration_id };
                         }
                         // The serial version records the incomplete chain for linearization and keeps searching the
                         // remaining targets; hand the whole reference to it
@@ -2503,16 +2516,13 @@ fn try_resolve_reference_readonly(graph: &Graph, id: ConstantReferenceId) -> Rea
 }
 
 /// Read-only mirror of `Resolver::run_resolution`. Must stay in sync with the serial implementation
-fn read_run_resolution(graph: &Graph, name_id: NameId, name: &Name) -> ReadOutcome {
+fn read_run_resolution(graph: &Graph, name: &Name) -> ReadOutcome {
     let str_id = *name.str();
 
     if let Some(nesting) = name.nesting() {
         match search_lexical_scopes(graph, name, str_id) {
             Outcome::Resolved(declaration_id, _) => {
-                return ReadOutcome::Resolved {
-                    name_id,
-                    declaration_id,
-                };
+                return ReadOutcome::Resolved { declaration_id };
             }
             Outcome::Retry(_) => return ReadOutcome::Requeue,
             Outcome::Unresolved(_) => {}
@@ -2542,10 +2552,7 @@ fn read_run_resolution(graph: &Graph, name_id: NameId, name: &Name) -> ReadOutco
         };
 
         return match ancestor_search {
-            ReadSearch::Found(declaration_id) => ReadOutcome::Resolved {
-                name_id,
-                declaration_id,
-            },
+            ReadSearch::Found(declaration_id) => ReadOutcome::Resolved { declaration_id },
             // The serial version resolves tentatively through Object's ancestors while the chain is incomplete
             ReadSearch::Incomplete => ReadOutcome::NeedsSerial,
             ReadSearch::NotFound => {
@@ -2559,10 +2566,7 @@ fn read_run_resolution(graph: &Graph, name_id: NameId, name: &Name) -> ReadOutco
 
                 if is_module {
                     match read_search_ancestors(graph, *OBJECT_ID, str_id) {
-                        ReadSearch::Found(declaration_id) => ReadOutcome::Resolved {
-                            name_id,
-                            declaration_id,
-                        },
+                        ReadSearch::Found(declaration_id) => ReadOutcome::Resolved { declaration_id },
                         ReadSearch::NotFound => ReadOutcome::Requeue,
                         ReadSearch::Incomplete => ReadOutcome::NeedsSerial,
                     }
@@ -2576,10 +2580,7 @@ fn read_run_resolution(graph: &Graph, name_id: NameId, name: &Name) -> ReadOutco
     // When there's no nesting, we're working at the top level of a script, which resolves through the ancestors of
     // `Object`
     match read_search_ancestors(graph, *OBJECT_ID, str_id) {
-        ReadSearch::Found(declaration_id) => ReadOutcome::Resolved {
-            name_id,
-            declaration_id,
-        },
+        ReadSearch::Found(declaration_id) => ReadOutcome::Resolved { declaration_id },
         ReadSearch::NotFound => ReadOutcome::Requeue,
         ReadSearch::Incomplete => ReadOutcome::NeedsSerial,
     }
