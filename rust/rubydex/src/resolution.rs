@@ -56,6 +56,7 @@ struct ResolutionProfile {
     reference_count: u64,
     reference_compute: std::time::Duration,
     reference_apply: std::time::Duration,
+    reference_record: std::time::Duration,
     ancestors: std::time::Duration,
     ancestor_count: u64,
     remaining_definitions: std::time::Duration,
@@ -78,6 +79,7 @@ impl ResolutionProfile {
             reference_count: 0,
             reference_compute: std::time::Duration::ZERO,
             reference_apply: std::time::Duration::ZERO,
+            reference_record: std::time::Duration::ZERO,
             ancestors: std::time::Duration::ZERO,
             ancestor_count: 0,
             remaining_definitions: std::time::Duration::ZERO,
@@ -139,6 +141,10 @@ impl ResolutionProfile {
             self.reference_compute, self.reference_apply
         );
         eprintln!(
+            "reference records:      {:?} (grouped batch insert)",
+            self.reference_record
+        );
+        eprintln!(
             "ancestors units:        {:?} ({} units)",
             self.ancestors, self.ancestor_count
         );
@@ -198,6 +204,10 @@ pub struct Resolver<'a> {
     /// waves of increasing depth: a name's parent scope and nesting are always strictly shallower, so by the time a
     /// wave runs, everything it can depend on was resolved in earlier waves
     name_depths: IdentityHashMap<NameId, u32>,
+    /// Resolved (declaration, reference) pairs from parallel waves, applied to the declarations' reference sets in
+    /// one grouped batch at the end of `resolve()`. Recording each reference as it resolves means one large-map
+    /// lookup per reference; grouping by declaration first reduces that to one lookup per declaration
+    deferred_reference_records: Vec<(DeclarationId, ConstantReferenceId)>,
 }
 
 impl<'a> Resolver<'a> {
@@ -209,6 +219,7 @@ impl<'a> Resolver<'a> {
             queued_ancestors: IdentityHashSet::default(),
             dirty_chains: IdentityHashSet::default(),
             name_depths: IdentityHashMap::default(),
+            deferred_reference_records: Vec::new(),
         }
     }
 
@@ -339,7 +350,7 @@ impl<'a> Resolver<'a> {
         for (_, unit_id, id, name_id) in wave {
             match *outcomes.get(name_id).unwrap() {
                 ReadOutcome::Resolved { declaration_id } => {
-                    self.graph.record_resolved_reference(*id, declaration_id);
+                    self.deferred_reference_records.push((declaration_id, *id));
                 }
                 ReadOutcome::Requeue => {
                     self.unit_queue.push_back(*unit_id);
@@ -354,6 +365,53 @@ impl<'a> Resolver<'a> {
         }
 
         ResolutionProfile::record(&mut profile.reference_apply, apply_started);
+    }
+
+    /// Applies the (declaration, reference) pairs collected by the parallel waves. The pairs are grouped by
+    /// declaration on worker threads first, so the serial step performs one declarations-map lookup per declaration
+    /// per chunk instead of one per reference
+    fn apply_deferred_reference_records(&mut self) {
+        let records = std::mem::take(&mut self.deferred_reference_records);
+
+        if records.is_empty() {
+            return;
+        }
+
+        let worker_count = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+        let chunk_size = records.len().div_ceil(worker_count);
+
+        let grouped: Vec<IdentityHashMap<DeclarationId, Vec<ConstantReferenceId>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = records
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        let mut map: IdentityHashMap<DeclarationId, Vec<ConstantReferenceId>> =
+                            IdentityHashMap::default();
+
+                        for (declaration_id, reference_id) in chunk {
+                            map.entry(*declaration_id).or_default().push(*reference_id);
+                        }
+
+                        map
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("reference grouping worker panicked"))
+                .collect()
+        });
+
+        for map in grouped {
+            for (declaration_id, reference_ids) in map {
+                let declaration = self.graph.declarations_mut().get_mut(&declaration_id).unwrap();
+
+                for reference_id in reference_ids {
+                    declaration.add_constant_reference(reference_id);
+                }
+            }
+        }
     }
 
     /// Runs the resolution phase on the graph. The resolution phase is when 4 main pieces of information are computed:
@@ -437,6 +495,10 @@ impl<'a> Resolver<'a> {
         let started = profile.start();
         self.handle_remaining_definitions(other_ids);
         ResolutionProfile::record(&mut profile.remaining_definitions, started);
+
+        let started = profile.start();
+        self.apply_deferred_reference_records();
+        ResolutionProfile::record(&mut profile.reference_record, started);
 
         let started = profile.start();
         self.compute_descendants();
