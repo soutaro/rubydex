@@ -186,6 +186,10 @@ pub struct Resolver<'a> {
     /// Declarations that gained a definition (or were promoted) after their ancestor chain was last built. Their
     /// mixins/superclass may have changed, so cached partial chains and the blocked-chain skip must not apply
     dirty_chains: IdentityHashSet<DeclarationId>,
+    /// Depth of every name (see `name_depth`), computed once in `prepare_units`. Reference batches are resolved in
+    /// waves of increasing depth: a name's parent scope and nesting are always strictly shallower, so by the time a
+    /// wave runs, everything it can depend on was resolved in earlier waves
+    name_depths: IdentityHashMap<NameId, u32>,
 }
 
 impl<'a> Resolver<'a> {
@@ -196,6 +200,7 @@ impl<'a> Resolver<'a> {
             made_progress: false,
             queued_ancestors: IdentityHashSet::default(),
             dirty_chains: IdentityHashSet::default(),
+            name_depths: IdentityHashMap::default(),
         }
     }
 
@@ -215,9 +220,6 @@ impl<'a> Resolver<'a> {
     /// deterministic. References that need to mutate the graph to resolve (`NeedsSerial`) run through the serial
     /// resolution path during the apply step. Small batches skip the threading overhead entirely
     fn process_reference_batch(&mut self, batch: Vec<(Unit, ConstantReferenceId)>) {
-        /// Batches smaller than this are processed serially: thread startup costs more than it saves
-        const PARALLEL_THRESHOLD: usize = 4096;
-
         if batch.len() < PARALLEL_THRESHOLD {
             for (unit_id, id) in batch {
                 self.handle_reference_unit(unit_id, id);
@@ -225,19 +227,51 @@ impl<'a> Resolver<'a> {
             return;
         }
 
-        // Resolution depends only on the name, and many references share a name (every call site of `Foo.bar` in
-        // the same lexical context reuses the same name), so run the kernel once per unique name and fan the outcome
-        // out to all references sharing it
+        // Split the batch into waves of increasing name depth. A name's parent scope and nesting are always strictly
+        // shallower than the name itself, so by the time a wave is resolved, every name it can depend on was already
+        // resolved (and applied) in an earlier wave. This preserves the serial version's intra-pass resolution
+        // cascade: without it, references would wait one full pass per depth level, multiplying retries
         let mut refs = Vec::with_capacity(batch.len());
-        let mut seen_names = IdentityHashSet::<NameId>::default();
-        let mut unique_names = Vec::new();
 
         for (unit_id, id) in batch {
             let name_id = *self.graph.constant_references().get(&id).unwrap().name_id();
-            refs.push((unit_id, id, name_id));
+            let depth = *self.name_depths.get(&name_id).unwrap();
+            refs.push((depth, unit_id, id, name_id));
+        }
 
-            if seen_names.insert(name_id) {
-                unique_names.push(name_id);
+        // Stable: preserves queue order within a depth for determinism
+        refs.sort_by_key(|(depth, ..)| *depth);
+
+        let mut rest = refs.as_slice();
+
+        while !rest.is_empty() {
+            let depth = rest[0].0;
+            let wave_end = rest.partition_point(|(d, ..)| *d == depth);
+            let (wave, remaining) = rest.split_at(wave_end);
+            rest = remaining;
+            self.process_reference_wave(wave);
+        }
+    }
+
+    /// Resolves one same-depth wave of constant references: read-only parallel resolution of the wave's unique names
+    /// against the immutable graph, followed by a serial apply of the outcomes in wave order
+    fn process_reference_wave(&mut self, wave: &[(u32, Unit, ConstantReferenceId, NameId)]) {
+        if wave.len() < PARALLEL_THRESHOLD {
+            for (_, unit_id, id, _) in wave {
+                self.handle_reference_unit(*unit_id, *id);
+            }
+            return;
+        }
+
+        // Resolution depends only on the name, and many references share a name (every call site of `Foo.bar` in
+        // the same lexical context reuses the same name), so run the kernel once per unique name and fan the outcome
+        // out to all references sharing it
+        let mut seen_names = IdentityHashSet::<NameId>::default();
+        let mut unique_names = Vec::new();
+
+        for (_, _, _, name_id) in wave {
+            if seen_names.insert(*name_id) {
+                unique_names.push(*name_id);
             }
         }
 
@@ -277,21 +311,21 @@ impl<'a> Resolver<'a> {
             outcomes
         };
 
-        for (unit_id, id, name_id) in refs {
-            match *outcomes.get(&name_id).unwrap() {
+        for (_, unit_id, id, name_id) in wave {
+            match *outcomes.get(name_id).unwrap() {
                 ReadOutcome::Resolved { declaration_id } => {
-                    self.graph.record_resolved_name(name_id, declaration_id);
-                    self.graph.record_resolved_reference(id, declaration_id);
+                    self.graph.record_resolved_name(*name_id, declaration_id);
+                    self.graph.record_resolved_reference(*id, declaration_id);
                     self.made_progress = true;
                 }
                 ReadOutcome::Requeue => {
-                    self.unit_queue.push_back(unit_id);
+                    self.unit_queue.push_back(*unit_id);
                 }
                 // The first reference with this name resolves it through the serial path (creating singleton classes
                 // or linearizing chains as needed); later references with the same name then hit the resolved-name
                 // fast path inside the serial resolver
                 ReadOutcome::NeedsSerial => {
-                    self.handle_reference_unit(unit_id, id);
+                    self.handle_reference_unit(*unit_id, *id);
                 }
             }
         }
@@ -2176,7 +2210,8 @@ impl<'a> Resolver<'a> {
         let names = self.graph.names();
 
         let started = profile.start();
-        let depths = Self::compute_name_depths(names);
+        self.name_depths = Self::compute_name_depths(names);
+        let depths = &self.name_depths;
         ResolutionProfile::record(&mut profile.prepare_depths, started);
         let started = profile.start();
 
@@ -2408,6 +2443,9 @@ impl<'a> Resolver<'a> {
         }
     }
 }
+
+/// Reference batches and waves smaller than this are processed serially: thread startup costs more than it saves
+const PARALLEL_THRESHOLD: usize = 4096;
 
 /// Outcome of a read-only resolution attempt for a constant name. Read-only attempts run in parallel against an
 /// immutable graph snapshot; the writes they describe are applied serially afterwards
