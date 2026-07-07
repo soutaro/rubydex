@@ -14,6 +14,7 @@ use crate::model::{
     ids::{ConstantReferenceId, DeclarationId, DefinitionId, NameId, StringId, UriId},
     name::{Name, NameRef, ParentScope},
 };
+use crate::offset::Offset;
 
 enum Outcome {
     /// The constant was successfully resolved to the given declaration ID. The second optional tuple element is a
@@ -2328,13 +2329,13 @@ impl<'a> Resolver<'a> {
     /// Namespace definitions and constant references are sorted by name depth for deterministic
     /// resolution order. Non-namespace definitions (methods, attrs, variables) are returned
     /// separately for `handle_remaining_definitions`.
+    #[allow(clippy::too_many_lines)]
     fn prepare_units(&mut self, profile: &mut ResolutionProfile) -> Vec<DefinitionId> {
         let work = self.graph.take_pending_work();
         let estimated = work.len() / 2;
         let mut definitions = Vec::with_capacity(estimated);
         let mut others = Vec::with_capacity(estimated);
         let mut singleton_methods = Vec::new();
-        let mut const_refs = Vec::new();
         let mut ancestors = vec![*BASIC_OBJECT_ID, *KERNEL_ID, *OBJECT_ID, *MODULE_ID, *CLASS_ID];
         let names = self.graph.names();
 
@@ -2360,75 +2361,139 @@ impl<'a> Resolver<'a> {
             uri_ranks.insert(uri_id, u32::try_from(rank).expect("more documents than u32::MAX"));
         }
 
-        // Dedup: when multiple files are indexed before resolution runs, pending_work accumulates
-        // and the same definition/reference ID can be enqueued more than once.
-        let mut seen_defs = IdentityHashSet::<DefinitionId>::default();
-        let mut seen_references = IdentityHashSet::<ConstantReferenceId>::default();
-        let mut seen_ancestors = IdentityHashSet::<DeclarationId>::default();
+        // Classification pass: compute each unit's kind and sort key. This part is read-only, so large work lists
+        // are classified on worker threads (chunks merge in order, so the result is independent of worker count).
+        // Deduplication needs global state and stays in the serial fan-out pass below
+        let classified: Vec<ClassifiedUnit> = {
+            let graph: &Graph = self.graph;
+            let uri_ranks = &uri_ranks;
 
-        for unit in work {
-            match unit {
-                Unit::Definition(id) => {
-                    if !seen_defs.insert(id) {
-                        continue;
-                    }
-                    // Definition may have been removed by remove_document_data — skip stale items
-                    let Some(definition) = self.graph.definitions().get(&id) else {
-                        continue;
-                    };
-                    let uri_rank = *uri_ranks.get(definition.uri_id()).unwrap();
+            let classify = |unit: &Unit| -> ClassifiedUnit {
+                match unit {
+                    Unit::Definition(id) => {
+                        // Definition may have been removed by remove_document_data — skip stale items
+                        let Some(definition) = graph.definitions().get(id) else {
+                            return ClassifiedUnit::Stale;
+                        };
+                        let uri_rank = *uri_ranks.get(definition.uri_id()).unwrap();
 
-                    match definition {
-                        Definition::Class(def) => {
-                            let depth = *depths.get(def.name_id()).unwrap();
-                            definitions.push((Unit::Definition(id), (depth, uri_rank, definition.offset())));
+                        let namespace_name_id = match definition {
+                            Definition::Class(def) => Some(*def.name_id()),
+                            Definition::Module(def) => Some(*def.name_id()),
+                            Definition::Constant(def) => Some(*def.name_id()),
+                            Definition::ConstantAlias(def) => Some(*def.name_id()),
+                            Definition::SingletonClass(def) => Some(*def.name_id()),
+                            _ => None,
+                        };
+
+                        if let Some(name_id) = namespace_name_id {
+                            let depth = *depths.get(&name_id).unwrap();
+                            return ClassifiedUnit::NamespaceDefinition((depth, uri_rank, definition.offset()));
                         }
-                        Definition::Module(def) => {
-                            let depth = *depths.get(def.name_id()).unwrap();
-                            definitions.push((Unit::Definition(id), (depth, uri_rank, definition.offset())));
-                        }
-                        Definition::Constant(def) => {
-                            let depth = *depths.get(def.name_id()).unwrap();
-                            definitions.push((Unit::Definition(id), (depth, uri_rank, definition.offset())));
-                        }
-                        Definition::ConstantAlias(def) => {
-                            let depth = *depths.get(def.name_id()).unwrap();
-                            definitions.push((Unit::Definition(id), (depth, uri_rank, definition.offset())));
-                        }
-                        Definition::SingletonClass(def) => {
-                            let depth = *depths.get(def.name_id()).unwrap();
-                            definitions.push((Unit::Definition(id), (depth, uri_rank, definition.offset())));
-                        }
+
                         // SelfReceiver methods create singleton classes, which need
                         // ancestor linearization. Process them in the convergence loop
                         // so Unit::Ancestors items are handled naturally.
-                        Definition::Method(method) if matches!(method.receiver(), Some(Receiver::SelfReceiver(_))) => {
-                            singleton_methods.push(Unit::Definition(id));
+                        if let Definition::Method(method) = definition
+                            && matches!(method.receiver(), Some(Receiver::SelfReceiver(_)))
+                        {
+                            return ClassifiedUnit::SingletonMethod;
                         }
-                        _ => {
-                            others.push((id, (*definition.uri_id(), definition.offset())));
+
+                        ClassifiedUnit::OtherDefinition((*definition.uri_id(), definition.offset()))
+                    }
+                    Unit::ConstantRef(id) => {
+                        // Reference may have been removed by remove_document_data — skip stale items
+                        let Some(constant_ref) = graph.constant_references().get(id) else {
+                            return ClassifiedUnit::Stale;
+                        };
+                        let uri_rank = *uri_ranks.get(&constant_ref.uri_id()).unwrap();
+                        let depth = *depths.get(constant_ref.name_id()).unwrap();
+                        ClassifiedUnit::Reference((depth, uri_rank, constant_ref.offset()))
+                    }
+                    Unit::Ancestors(id) => {
+                        // Declaration may have been removed by invalidation — skip stale items
+                        if graph.declarations().contains_key(id) {
+                            ClassifiedUnit::Ancestors
+                        } else {
+                            ClassifiedUnit::Stale
                         }
                     }
                 }
-                Unit::ConstantRef(id) => {
-                    if !seen_references.insert(id) {
-                        continue;
+            };
+
+            if work.len() < PARALLEL_THRESHOLD {
+                work.iter().map(classify).collect()
+            } else {
+                let worker_count = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+                let chunk_size = work.len().div_ceil(worker_count);
+                let mut classified = Vec::with_capacity(work.len());
+
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = work
+                        .chunks(chunk_size)
+                        .map(|chunk| scope.spawn(move || chunk.iter().map(classify).collect::<Vec<_>>()))
+                        .collect();
+
+                    for handle in handles {
+                        classified.extend(handle.join().expect("classification worker panicked"));
                     }
-                    // Reference may have been removed by remove_document_data — skip stale items
-                    let Some(constant_ref) = self.graph.constant_references().get(&id) else {
-                        continue;
-                    };
-                    let uri_rank = *uri_ranks.get(&constant_ref.uri_id()).unwrap();
-                    let depth = *depths.get(constant_ref.name_id()).unwrap();
-                    const_refs.push((Unit::ConstantRef(id), (depth, uri_rank, constant_ref.offset())));
+                });
+
+                classified
+            }
+        };
+
+        // Serial fan-out pass: deduplicate and distribute units. When multiple files are indexed before resolution
+        // runs, pending_work accumulates and the same definition/reference ID can be enqueued more than once.
+        // References are distributed into per-depth buckets so the buckets can be sorted independently below
+        let mut seen_defs = IdentityHashSet::<DefinitionId>::default();
+        let mut seen_references = IdentityHashSet::<ConstantReferenceId>::default();
+        let mut seen_ancestors = IdentityHashSet::<DeclarationId>::default();
+        let mut refs_by_depth: Vec<Vec<(Unit, (u32, &Offset))>> = Vec::new();
+
+        for (unit, classified_unit) in work.iter().zip(classified) {
+            match classified_unit {
+                ClassifiedUnit::Stale => {}
+                ClassifiedUnit::NamespaceDefinition(key) => {
+                    let Unit::Definition(id) = unit else { unreachable!() };
+
+                    if seen_defs.insert(*id) {
+                        definitions.push((*unit, key));
+                    }
                 }
-                Unit::Ancestors(id) => {
-                    if !seen_ancestors.insert(id) {
-                        continue;
+                ClassifiedUnit::SingletonMethod => {
+                    let Unit::Definition(id) = unit else { unreachable!() };
+
+                    if seen_defs.insert(*id) {
+                        singleton_methods.push(*unit);
                     }
-                    // Declaration may have been removed by invalidation — skip stale items
-                    if self.graph.declarations().contains_key(&id) {
-                        ancestors.push(id);
+                }
+                ClassifiedUnit::OtherDefinition(key) => {
+                    let Unit::Definition(id) = unit else { unreachable!() };
+
+                    if seen_defs.insert(*id) {
+                        others.push((*id, key));
+                    }
+                }
+                ClassifiedUnit::Reference((depth, uri_rank, offset)) => {
+                    let Unit::ConstantRef(id) = unit else { unreachable!() };
+
+                    if seen_references.insert(*id) {
+                        let bucket = depth as usize;
+
+                        if refs_by_depth.len() <= bucket {
+                            refs_by_depth.resize_with(bucket + 1, Vec::new);
+                        }
+
+                        refs_by_depth[bucket].push((*unit, (uri_rank, offset)));
+                    }
+                }
+                ClassifiedUnit::Ancestors => {
+                    let Unit::Ancestors(id) = unit else { unreachable!() };
+
+                    if seen_ancestors.insert(*id) {
+                        ancestors.push(*id);
                     }
                 }
             }
@@ -2441,14 +2506,35 @@ impl<'a> Resolver<'a> {
         // When the depth is the same, sort by URI rank and offset to maintain determinism
         definitions.sort_unstable_by(|(_, key_a), (_, key_b)| key_a.cmp(key_b));
 
-        const_refs.sort_unstable_by(|(_, key_a), (_, key_b)| key_a.cmp(key_b));
+        // References are already partitioned by depth, so sorting each bucket by (URI rank, offset) and
+        // concatenating in depth order is equivalent to one big sort by (depth, URI rank, offset) — and the buckets
+        // can be sorted on worker threads independently
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
 
-        others.sort_unstable_by_key(|(_, key)| *key);
+            for bucket in &mut refs_by_depth {
+                if bucket.len() < PARALLEL_THRESHOLD {
+                    bucket.sort_unstable_by(|(_, key_a), (_, key_b)| key_a.cmp(key_b));
+                } else {
+                    handles.push(scope.spawn(move || {
+                        bucket.sort_unstable_by(|(_, key_a), (_, key_b)| key_a.cmp(key_b));
+                    }));
+                }
+            }
+
+            for handle in handles {
+                handle.join().expect("sorting worker panicked");
+            }
+        });
+
+        others.sort_unstable_by(|(_, key_a), (_, key_b)| key_a.cmp(key_b));
         ResolutionProfile::record(&mut profile.prepare_sort, started);
 
         // Definitions first, then constant refs, then singleton methods, then ancestors
         self.unit_queue.extend(definitions.into_iter().map(|(id, _)| id));
-        self.unit_queue.extend(const_refs.into_iter().map(|(id, _)| id));
+        for bucket in refs_by_depth {
+            self.unit_queue.extend(bucket.into_iter().map(|(id, _)| id));
+        }
         self.unit_queue.extend(singleton_methods);
         self.queued_ancestors.extend(ancestors.iter().copied());
         self.unit_queue.extend(ancestors.into_iter().map(Unit::Ancestors));
@@ -2595,6 +2681,22 @@ enum ReadOutcome {
     /// Resolving requires mutating the graph (linearizing a chain, creating a singleton class, promoting a constant),
     /// so the serial resolution path must handle this reference
     NeedsSerial,
+}
+
+/// Kind and sort key of a pending work unit, computed by the (parallelizable) read-only classification pass of
+/// `prepare_units`
+enum ClassifiedUnit<'graph> {
+    /// Class/module/constant/alias/singleton definitions, keyed by (name depth, URI rank, offset)
+    NamespaceDefinition((u32, u32, &'graph Offset)),
+    /// `def self.x` methods, processed in the convergence loop
+    SingletonMethod,
+    /// Definitions handled by `handle_remaining_definitions`, keyed by (URI id, offset)
+    OtherDefinition((UriId, &'graph Offset)),
+    /// Constant references, keyed by (name depth, URI rank, offset)
+    Reference((u32, u32, &'graph Offset)),
+    Ancestors,
+    /// The underlying definition/reference/declaration no longer exists
+    Stale,
 }
 
 /// Result of searching a declaration's ancestor chain without mutating the graph
