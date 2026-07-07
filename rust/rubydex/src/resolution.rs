@@ -28,7 +28,7 @@ enum Outcome {
     /// must be placed back in the queue and retried once we have progressed further. `partial` is `true` when the
     /// blocker was a still-partial ancestor chain (the member may appear once the chain completes); `false` when it was
     /// a plain missing dependency (an unresolved parent scope, alias, or lexical nesting).
-    Retry { partial: bool },
+    Retry { partial_ancestors: bool },
 }
 
 impl Outcome {
@@ -195,7 +195,9 @@ impl<'a> Resolver<'a> {
                         None => Outcome::Unresolved,
                     },
                     // Owning class not resolved yet — retry next pass
-                    None => Outcome::Retry { partial: false },
+                    None => Outcome::Retry {
+                        partial_ancestors: false,
+                    },
                 }
             }
             _ => panic!("Expected constant or singleton method definitions"),
@@ -1233,7 +1235,9 @@ impl<'a> Resolver<'a> {
             // `set_singleton_class_id`, not `add_member`, so a TODO receiver would never gain a
             // member. Emit Retry so the unit is preserved for a later resolve where the receiver
             // may exist.
-            Outcome::Unresolved if singleton => Outcome::Retry { partial: false },
+            Outcome::Unresolved if singleton => Outcome::Retry {
+                partial_ancestors: false,
+            },
             Outcome::Unresolved => Outcome::Resolved(self.create_todo_for_parent(name_id)),
             other => other,
         };
@@ -1320,7 +1324,9 @@ impl<'a> Resolver<'a> {
                 // The parent scope is genuinely unknown — not a circular alias or pending
                 // linearization, but a name that doesn't exist anywhere in the graph.
                 Outcome::Unresolved => Outcome::Unresolved,
-                Outcome::Retry { partial: false } if !preserve_retry => Outcome::Unresolved,
+                Outcome::Retry {
+                    partial_ancestors: false,
+                } if !preserve_retry => Outcome::Unresolved,
                 retry @ Outcome::Retry { .. } => retry,
             }
         } else if let Some(nesting_id) = name_ref.nesting()
@@ -1336,7 +1342,9 @@ impl<'a> Resolver<'a> {
                 NameRef::Unresolved(_) => {
                     // The only case where we wouldn't have the nesting resolved at this point is if it's available through
                     // inheritance or if it doesn't exist, so we need to retry later
-                    Outcome::Retry { partial: false }
+                    Outcome::Retry {
+                        partial_ancestors: false,
+                    }
                 }
             }
         } else {
@@ -1405,7 +1413,9 @@ impl<'a> Resolver<'a> {
 
         // Get the primary (first) resolved target
         let Some(&primary_id) = resolved_ids.first() else {
-            return Outcome::Retry { partial: false };
+            return Outcome::Retry {
+                partial_ancestors: false,
+            };
         };
 
         // Check if the primary result is still an unresolved alias
@@ -1413,7 +1423,9 @@ impl<'a> Resolver<'a> {
             self.graph.declarations().get(&primary_id),
             Some(Declaration::ConstantAlias(_))
         ) {
-            return Outcome::Retry { partial: false };
+            return Outcome::Retry {
+                partial_ancestors: false,
+            };
         }
 
         Outcome::Resolved(primary_id)
@@ -1439,7 +1451,9 @@ impl<'a> Resolver<'a> {
                     }
                     ParentScope::Attached(parent_scope_id) => {
                         let NameRef::Resolved(parent_scope) = self.graph.names().get(parent_scope_id).unwrap() else {
-                            return Outcome::Retry { partial: false };
+                            return Outcome::Retry {
+                                partial_ancestors: false,
+                            };
                         };
 
                         let mut target_decl_id = *parent_scope.declaration_id();
@@ -1453,7 +1467,9 @@ impl<'a> Resolver<'a> {
                             if resolved_ids.iter().any(|id| {
                                 matches!(self.graph.declarations().get(id), Some(Declaration::ConstantAlias(_)))
                             }) {
-                                return Outcome::Retry { partial: false };
+                                return Outcome::Retry {
+                                    partial_ancestors: false,
+                                };
                             }
 
                             let Some(&namespace_id) = resolved_ids.iter().find(|id| {
@@ -1487,7 +1503,9 @@ impl<'a> Resolver<'a> {
                     }
                     ParentScope::Some(parent_scope_id) => {
                         let NameRef::Resolved(parent_scope) = self.graph.names().get(parent_scope_id).unwrap() else {
-                            return Outcome::Retry { partial: false };
+                            return Outcome::Retry {
+                                partial_ancestors: false,
+                            };
                         };
 
                         // Resolve the namespace in case it's an alias (e.g., ALIAS::CONST where ALIAS = Foo)
@@ -1502,7 +1520,9 @@ impl<'a> Resolver<'a> {
                             match self.graph.declarations().get(&id) {
                                 Some(Declaration::ConstantAlias(_)) => {
                                     // Alias not fully resolved yet
-                                    return Outcome::Retry { partial: false };
+                                    return Outcome::Retry {
+                                        partial_ancestors: false,
+                                    };
                                 }
                                 Some(Declaration::Namespace(_)) => {
                                     found_namespace = true;
@@ -1512,11 +1532,15 @@ impl<'a> Resolver<'a> {
                                             self.graph.record_resolved_name(name_id, declaration_id);
                                             return Outcome::Resolved(declaration_id);
                                         }
-                                        Outcome::Retry { partial: true } => {
+                                        Outcome::Retry {
+                                            partial_ancestors: true,
+                                        } => {
                                             missing_partial = true;
                                         }
                                         Outcome::Unresolved => {}
-                                        Outcome::Retry { partial: false } => {
+                                        Outcome::Retry {
+                                            partial_ancestors: false,
+                                        } => {
                                             unreachable!("search_ancestors never returns a non-partial Retry")
                                         }
                                     }
@@ -1536,7 +1560,7 @@ impl<'a> Resolver<'a> {
                         // whether the miss was due to a still-partial ancestor chain, so the unit is re-checked once
                         // that chain completes.
                         Outcome::Retry {
-                            partial: missing_partial,
+                            partial_ancestors: missing_partial,
                         }
                     }
                 }
@@ -1620,7 +1644,9 @@ impl<'a> Resolver<'a> {
                     for &id in &resolved_ids {
                         match self.graph.declarations().get(&id) {
                             Some(Declaration::ConstantAlias(_)) => {
-                                result = Outcome::Retry { partial: false };
+                                result = Outcome::Retry {
+                                    partial_ancestors: false,
+                                };
                                 break;
                             }
                             Some(Declaration::Namespace(_)) => {
@@ -1634,7 +1660,12 @@ impl<'a> Resolver<'a> {
 
                     (result, decl_id)
                 }
-                NameRef::Unresolved(_) => (Outcome::Retry { partial: false }, None),
+                NameRef::Unresolved(_) => (
+                    Outcome::Retry {
+                        partial_ancestors: false,
+                    },
+                    None,
+                ),
             };
 
             if matches!(ancestor_outcome, Outcome::Resolved(..)) {
@@ -1649,7 +1680,12 @@ impl<'a> Resolver<'a> {
                     Some(Declaration::Namespace(Namespace::Module(_) | Namespace::Todo(_)))
                 )
             });
-            let chain_incomplete = matches!(ancestor_outcome, Outcome::Retry { partial: true });
+            let chain_incomplete = matches!(
+                ancestor_outcome,
+                Outcome::Retry {
+                    partial_ancestors: true
+                }
+            );
 
             if is_module || chain_incomplete {
                 let object_outcome = self.search_ancestors(*OBJECT_ID, str_id);
@@ -1695,7 +1731,9 @@ impl<'a> Resolver<'a> {
                             // Stop at unresolved ancestors to avoid resolving to a later one.
                             // Skip if the name matches what we're searching for.
                             if *self.graph.names().get(&name_id).unwrap().str() != str_id {
-                                return Outcome::Retry { partial: true };
+                                return Outcome::Retry {
+                                    partial_ancestors: true,
+                                };
                             }
                         }
                         Ancestor::Complete(ancestor_id) => {
@@ -1713,7 +1751,9 @@ impl<'a> Resolver<'a> {
                         }
                     }
                 }
-                Outcome::Retry { partial: true }
+                Outcome::Retry {
+                    partial_ancestors: true,
+                }
             }
         }
     }
@@ -1735,7 +1775,9 @@ impl<'a> Resolver<'a> {
 
                 current_name = nesting_name_ref.name();
             } else {
-                return Outcome::Retry { partial: false };
+                return Outcome::Retry {
+                    partial_ancestors: false,
+                };
             }
         }
 
