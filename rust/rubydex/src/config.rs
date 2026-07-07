@@ -21,7 +21,7 @@ pub const DEFAULT_EXCLUDED_DIRECTORIES: &[&str] = &[
 /// Configuration coming from a config file
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
-    /// Paths to exclude from file discovery during indexing.
+    /// Patterns to exclude from file discovery during indexing.
     #[serde(default)]
     exclude: Vec<Box<str>>,
 }
@@ -31,7 +31,7 @@ struct ConfigFile {
 pub struct Config {
     /// Path to the workspace being analyzed
     workspace_path: Box<Path>,
-    /// Paths to exclude from file discovery during indexing.
+    /// Patterns to exclude from file discovery during indexing.
     excluded_paths: HashSet<Box<str>>,
 }
 assert_mem_size!(Config, 64);
@@ -65,13 +65,13 @@ impl Config {
         self.workspace_path = workspace_path.into_boxed_path();
     }
 
-    /// Adds paths to exclude from file discovery during indexing. Excluded directories will be skipped entirely during
+    /// Adds patterns to exclude from file discovery during indexing. Excluded directories will be skipped entirely during
     /// directory traversal.
     pub fn exclude_paths(&mut self, paths: impl IntoIterator<Item = Box<str>>) {
         self.excluded_paths.extend(paths);
     }
 
-    /// Returns the set of paths excluded from file discovery
+    /// Returns the set of exclusion patterns resolved against the workspace path.
     #[must_use]
     pub fn excluded_paths(&self) -> HashSet<Box<str>> {
         self.excluded_paths
@@ -80,7 +80,7 @@ impl Config {
                 self.workspace_path
                     .join(&**entry)
                     .to_string_lossy()
-                    .replace(std::path::MAIN_SEPARATOR, "/")
+                    .into_owned()
                     .into_boxed_str()
             })
             .collect()
@@ -145,19 +145,32 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    fn workspace_exclusion(entry: &str) -> String {
+        PathBuf::from("/workspace").join(entry).to_string_lossy().into_owned()
+    }
+
     #[test]
-    fn excluded_paths_are_resolved_against_the_workspace_path() {
+    fn excluded_paths_resolves_patterns_against_the_workspace_path() {
         let mut config = Config::new();
         config.set_workspace_path(PathBuf::from("/workspace"));
-        config.exclude_paths([Box::from("vendor"), Box::from("/absolute/path")]);
+        config.exclude_paths([
+            Box::from("vendor"),
+            Box::from("**/fixtures"),
+            Box::from("/absolute/path"),
+        ]);
 
         let excluded = config.excluded_paths();
 
-        // Relative entries (including the defaults) are joined with the workspace path.
-        assert!(excluded.contains("/workspace/vendor"));
-        assert!(excluded.contains("/workspace/.git"));
-        // Absolute entries pass through unchanged.
-        assert!(excluded.contains("/absolute/path"));
+        let vendor = workspace_exclusion("vendor");
+        let fixtures = workspace_exclusion("**/fixtures");
+        let absolute = PathBuf::from("/absolute/path").to_string_lossy().into_owned();
+        let git = workspace_exclusion(".git");
+
+        assert!(excluded.contains(vendor.as_str()));
+        assert!(excluded.contains(fixtures.as_str()));
+        assert!(excluded.contains(absolute.as_str()));
+        // Defaults are included and resolved as well.
+        assert!(excluded.contains(git.as_str()));
     }
 
     #[test]
@@ -187,10 +200,10 @@ mod tests {
 
         let excluded = config.excluded_paths();
         // Entries from the file are merged in and resolved against the workspace path.
-        assert!(excluded.contains("/workspace/vendor"));
-        assert!(excluded.contains("/workspace/generated"));
+        assert!(excluded.contains(workspace_exclusion("vendor").as_str()));
+        assert!(excluded.contains(workspace_exclusion("generated").as_str()));
         // Defaults seeded at construction survive the merge.
-        assert!(excluded.contains("/workspace/node_modules"));
+        assert!(excluded.contains(workspace_exclusion("node_modules").as_str()));
         // A config file cannot override the programmatically-set workspace path.
         assert_eq!(config.workspace_path(), Path::new("/workspace"));
     }
@@ -211,8 +224,8 @@ mod tests {
             .expect("expected the second file to load");
 
         let excluded = config.excluded_paths();
-        assert!(excluded.contains("/workspace/vendor"));
-        assert!(excluded.contains("/workspace/generated"));
+        assert!(excluded.contains(workspace_exclusion("vendor").as_str()));
+        assert!(excluded.contains(workspace_exclusion("generated").as_str()));
     }
 
     #[test]
@@ -250,11 +263,7 @@ mod tests {
         config.set_workspace_path(dir.path().to_path_buf());
         config.load_default().expect("expected rubydex.toml to load");
 
-        let expected = dir
-            .path()
-            .join("vendor")
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/");
+        let expected = dir.path().join("vendor").to_string_lossy().into_owned();
         assert!(config.excluded_paths().contains(expected.as_str()));
     }
 
