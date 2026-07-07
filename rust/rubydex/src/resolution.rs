@@ -21,15 +21,13 @@ use crate::model::{
 enum Outcome {
     /// The constant was successfully resolved to the given declaration ID.
     Resolved(DeclarationId),
-    /// We had everything we needed to resolve this constant, but we couldn't find it. When `partial` is `true`, the
-    /// lookup stopped at a still-partial ancestor chain, so the member may yet appear once that chain completes and the
-    /// unit should be retried. When `false`, the lookup is definitive (all relevant ancestor chains are complete) and
-    /// the unit can be dropped.
-    Unresolved { partial: bool },
-    /// We couldn't resolve this constant right now because a dependency was missing (an unresolved parent scope, alias,
-    /// or lexical nesting), or because a relevant ancestor chain is still partial. The unit must be placed back in the
-    /// queue and retried once we have progressed further. `partial` is `true` when the blocker was a partial ancestor
-    /// chain (mirrors `Unresolved::partial`).
+    /// We had everything we needed to resolve this constant (all relevant ancestor chains are complete), but the member
+    /// isn't there. This is definitive: the unit can be dropped and a diagnostic emitted.
+    Unresolved,
+    /// We couldn't resolve this constant right now because a dependency was missing, so it may succeed later. The unit
+    /// must be placed back in the queue and retried once we have progressed further. `partial` is `true` when the
+    /// blocker was a still-partial ancestor chain (the member may appear once the chain completes); `false` when it was
+    /// a plain missing dependency (an unresolved parent scope, alias, or lexical nesting).
     Retry { partial: bool },
 }
 
@@ -141,7 +139,7 @@ impl<'a> Resolver<'a> {
     pub fn resolve_constant(&mut self, name_id: NameId) -> Option<DeclarationId> {
         match self.resolve_constant_internal(name_id) {
             Outcome::Resolved(id) => Some(id),
-            Outcome::Unresolved { .. } | Outcome::Retry { .. } => None,
+            Outcome::Unresolved | Outcome::Retry { .. } => None,
         }
     }
 
@@ -194,7 +192,7 @@ impl<'a> Resolver<'a> {
                             Outcome::Resolved(singleton_id)
                         }
                         // Owner is a non-promotable constant — method is orphaned
-                        None => Outcome::Unresolved { partial: false },
+                        None => Outcome::Unresolved,
                     },
                     // Owning class not resolved yet — retry next pass
                     None => Outcome::Retry { partial: false },
@@ -204,10 +202,10 @@ impl<'a> Resolver<'a> {
         };
 
         match outcome {
-            Outcome::Retry { .. } | Outcome::Unresolved { partial: true } => {
+            Outcome::Retry { .. } => {
                 self.unit_queue.push_back(unit_id);
             }
-            Outcome::Unresolved { partial: false } => {
+            Outcome::Unresolved => {
                 // We couldn't resolve this name. Emit a diagnostic
             }
             Outcome::Resolved(id) => {
@@ -228,8 +226,13 @@ impl<'a> Resolver<'a> {
                 self.graph.record_resolved_reference(id, declaration_id);
                 self.made_progress = true;
             }
-            Outcome::Retry { .. } | Outcome::Unresolved { .. } => {
+            Outcome::Retry { .. } => {
                 self.unit_queue.push_back(unit_id);
+            }
+            Outcome::Unresolved => {
+                // If we had everything we needed to resolve this constant and still failed, then remember it as work
+                // for the next incremental resolution pass, but avoid trying again in this cycle
+                self.graph.push_work(unit_id);
             }
         }
     }
@@ -1230,8 +1233,8 @@ impl<'a> Resolver<'a> {
             // `set_singleton_class_id`, not `add_member`, so a TODO receiver would never gain a
             // member. Emit Retry so the unit is preserved for a later resolve where the receiver
             // may exist.
-            Outcome::Unresolved { partial: false } if singleton => Outcome::Retry { partial: false },
-            Outcome::Unresolved { partial: false } => Outcome::Resolved(self.create_todo_for_parent(name_id)),
+            Outcome::Unresolved if singleton => Outcome::Retry { partial: false },
+            Outcome::Unresolved => Outcome::Resolved(self.create_todo_for_parent(name_id)),
             other => other,
         };
 
@@ -1263,7 +1266,7 @@ impl<'a> Resolver<'a> {
                 // Foo = 1
                 // class << Foo; end
                 if singleton && !owner_is_namespace {
-                    return Outcome::Unresolved { partial: false };
+                    return Outcome::Unresolved;
                 }
 
                 // We don't prefix declarations with `Object::`
@@ -1316,9 +1319,9 @@ impl<'a> Resolver<'a> {
                 Outcome::Resolved(id) => self.resolve_to_primary_namespace(id),
                 // The parent scope is genuinely unknown — not a circular alias or pending
                 // linearization, but a name that doesn't exist anywhere in the graph.
-                Outcome::Unresolved { partial: false } => Outcome::Unresolved { partial: false },
-                Outcome::Retry { partial: false } if !preserve_retry => Outcome::Unresolved { partial: false },
-                other => other,
+                Outcome::Unresolved => Outcome::Unresolved,
+                Outcome::Retry { partial: false } if !preserve_retry => Outcome::Unresolved,
+                retry @ Outcome::Retry { .. } => retry,
             }
         } else if let Some(nesting_id) = name_ref.nesting()
             && !name_ref.parent_scope().is_top_level()
@@ -1456,7 +1459,7 @@ impl<'a> Resolver<'a> {
                             let Some(&namespace_id) = resolved_ids.iter().find(|id| {
                                 matches!(self.graph.declarations().get(id), Some(Declaration::Namespace(_)))
                             }) else {
-                                return Outcome::Unresolved { partial: false };
+                                return Outcome::Unresolved;
                             };
 
                             target_decl_id = namespace_id;
@@ -1465,7 +1468,7 @@ impl<'a> Resolver<'a> {
                         // If we found a singleton reference with a resolved attached object parent scope, we
                         // automatically create the singleton class
                         let Some(singleton_id) = self.get_or_create_singleton_class(target_decl_id, false) else {
-                            return Outcome::Unresolved { partial: false };
+                            return Outcome::Unresolved;
                         };
                         self.graph.record_resolved_name(name_id, singleton_id);
                         // `get_or_create_singleton_class` already enqueued the singleton's ancestors on
@@ -1509,10 +1512,10 @@ impl<'a> Resolver<'a> {
                                             self.graph.record_resolved_name(name_id, declaration_id);
                                             return Outcome::Resolved(declaration_id);
                                         }
-                                        Outcome::Retry { partial: true } | Outcome::Unresolved { partial: true } => {
+                                        Outcome::Retry { partial: true } => {
                                             missing_partial = true;
                                         }
-                                        Outcome::Unresolved { partial: false } => {}
+                                        Outcome::Unresolved => {}
                                         Outcome::Retry { partial: false } => {
                                             unreachable!("search_ancestors never returns a non-partial Retry")
                                         }
@@ -1526,15 +1529,14 @@ impl<'a> Resolver<'a> {
 
                         // If no namespaces were found, this constant path can never resolve.
                         if !found_namespace {
-                            return Outcome::Unresolved { partial: false };
+                            return Outcome::Unresolved;
                         }
 
-                        // Member not found in any namespace yet - retry in case it's added later. If the miss was due
-                        // to a still-partial ancestor chain, mark it so the unit is re-checked once the chain completes.
-                        if missing_partial {
-                            Outcome::Unresolved { partial: true }
-                        } else {
-                            Outcome::Retry { partial: false }
+                        // Member not found in any namespace yet - retry in case it's added later. `partial` records
+                        // whether the miss was due to a still-partial ancestor chain, so the unit is re-checked once
+                        // that chain completes.
+                        Outcome::Retry {
+                            partial: missing_partial,
                         }
                     }
                 }
@@ -1612,7 +1614,7 @@ impl<'a> Resolver<'a> {
             let (ancestor_outcome, nesting_decl_id) = match self.graph.names().get(nesting).unwrap() {
                 NameRef::Resolved(nesting_name_ref) => {
                     let resolved_ids = self.resolve_alias_chains(*nesting_name_ref.declaration_id());
-                    let mut result = Outcome::Unresolved { partial: false };
+                    let mut result = Outcome::Unresolved;
                     let mut decl_id = None;
 
                     for &id in &resolved_ids {
@@ -1647,10 +1649,7 @@ impl<'a> Resolver<'a> {
                     Some(Declaration::Namespace(Namespace::Module(_) | Namespace::Todo(_)))
                 )
             });
-            let chain_incomplete = matches!(
-                ancestor_outcome,
-                Outcome::Retry { partial: true } | Outcome::Unresolved { partial: true }
-            );
+            let chain_incomplete = matches!(ancestor_outcome, Outcome::Retry { partial: true });
 
             if is_module || chain_incomplete {
                 let object_outcome = self.search_ancestors(*OBJECT_ID, str_id);
@@ -1688,7 +1687,7 @@ impl<'a> Resolver<'a> {
                         None
                     }
                 })
-                .unwrap_or(Outcome::Unresolved { partial: false }),
+                .unwrap_or(Outcome::Unresolved),
             Ancestors::Partial(ids) => {
                 for ancestor_id in ids {
                     match ancestor_id {
@@ -1714,7 +1713,7 @@ impl<'a> Resolver<'a> {
                         }
                     }
                 }
-                Outcome::Unresolved { partial: true }
+                Outcome::Retry { partial: true }
             }
         }
     }
@@ -1740,7 +1739,7 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        Outcome::Unresolved { partial: false }
+        Outcome::Unresolved
     }
 
     /// Returns a complexity score for a given name, which is used to sort names for resolution. The complexity is based
