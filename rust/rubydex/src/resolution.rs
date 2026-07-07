@@ -304,10 +304,7 @@ impl<'a> Resolver<'a> {
             let graph: &Graph = self.graph;
             let worker_count = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
             let chunk_size = unique_names.len().div_ceil(worker_count);
-            let mut outcomes = IdentityHashMap::<NameId, ReadOutcome>::with_capacity_and_hasher(
-                unique_names.len(),
-                IdentityHashBuilder,
-            );
+            let mut outcomes = Vec::with_capacity(unique_names.len());
 
             std::thread::scope(|scope| {
                 let handles: Vec<_> = unique_names
@@ -322,14 +319,8 @@ impl<'a> Resolver<'a> {
                     })
                     .collect();
 
-                let mut chunks = unique_names.chunks(chunk_size);
-
                 for handle in handles {
-                    let chunk = chunks.next().unwrap();
-
-                    for (name_id, outcome) in chunk.iter().zip(handle.join().expect("resolution worker panicked")) {
-                        outcomes.insert(*name_id, outcome);
-                    }
+                    outcomes.extend(handle.join().expect("resolution worker panicked"));
                 }
             });
 
@@ -339,30 +330,81 @@ impl<'a> Resolver<'a> {
         ResolutionProfile::record(&mut profile.reference_compute, compute_started);
         let apply_started = profile.start();
 
-        // Resolved names are recorded once per unique name instead of once per reference
-        for name_id in &unique_names {
-            if let ReadOutcome::Resolved { declaration_id } = outcomes.get(name_id).unwrap() {
-                self.graph.record_resolved_name(*name_id, *declaration_id);
-                self.made_progress = true;
+        // Serial step, once per unique name (not once per reference): record resolved names, and run the mutating
+        // serial resolution for NeedsSerial names (creating singleton classes, linearizing chains, promoting
+        // constants). Individual references pick the results up from the name table in the parallel sweep below
+        for (name_id, outcome) in unique_names.iter().zip(outcomes) {
+            match outcome {
+                ReadOutcome::Resolved { declaration_id } => {
+                    self.graph.record_resolved_name(*name_id, declaration_id);
+                    self.made_progress = true;
+                }
+                ReadOutcome::Requeue => {}
+                ReadOutcome::NeedsSerial => {
+                    // `resolve_constant_internal` records the name itself on success. Mirrors handle_reference_unit,
+                    // except that requeueing is handled per reference by the sweep below
+                    match self.resolve_constant_internal(*name_id) {
+                        Outcome::Resolved(_, needs_linearization) => {
+                            self.made_progress = true;
+
+                            if let Some(declaration_id) = needs_linearization {
+                                self.enqueue_ancestors(declaration_id);
+                            }
+                        }
+                        Outcome::Retry(needs_linearization) | Outcome::Unresolved(needs_linearization) => {
+                            if let Some(declaration_id) = needs_linearization {
+                                self.enqueue_ancestors(declaration_id);
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        for (_, unit_id, id, name_id) in wave {
-            match *outcomes.get(name_id).unwrap() {
-                ReadOutcome::Resolved { declaration_id } => {
-                    self.deferred_reference_records.push((declaration_id, *id));
+        // Parallel sweep: fan the resolved names out to their references. Each worker reads the (now updated) name
+        // table and produces (declaration, reference) pairs for resolved names and requeues for unresolved ones.
+        // Chunks are merged in order, so the result is identical regardless of worker count
+        let (pairs, requeues) = {
+            let graph: &Graph = self.graph;
+            let worker_count = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+            let chunk_size = wave.len().div_ceil(worker_count);
+            let mut pairs = Vec::with_capacity(wave.len());
+            let mut requeues = Vec::new();
+
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = wave
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            let mut pairs = Vec::with_capacity(chunk.len());
+                            let mut requeues = Vec::new();
+
+                            for (_, unit_id, id, name_id) in chunk {
+                                match graph.names().get(name_id).unwrap() {
+                                    NameRef::Resolved(resolved) => {
+                                        pairs.push((*resolved.declaration_id(), *id));
+                                    }
+                                    NameRef::Unresolved(_) => requeues.push(*unit_id),
+                                }
+                            }
+
+                            (pairs, requeues)
+                        })
+                    })
+                    .collect();
+
+                for handle in handles {
+                    let (chunk_pairs, chunk_requeues) = handle.join().expect("reference sweep worker panicked");
+                    pairs.extend(chunk_pairs);
+                    requeues.extend(chunk_requeues);
                 }
-                ReadOutcome::Requeue => {
-                    self.unit_queue.push_back(*unit_id);
-                }
-                // The first reference with this name resolves it through the serial path (creating singleton classes
-                // or linearizing chains as needed); later references with the same name then hit the resolved-name
-                // fast path inside the serial resolver
-                ReadOutcome::NeedsSerial => {
-                    self.handle_reference_unit(*unit_id, *id);
-                }
-            }
-        }
+            });
+
+            (pairs, requeues)
+        };
+
+        self.deferred_reference_records.extend(pairs);
+        self.unit_queue.extend(requeues);
 
         ResolutionProfile::record(&mut profile.reference_apply, apply_started);
     }
