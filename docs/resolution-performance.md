@@ -161,6 +161,19 @@ writes go through the single `&mut Graph` and are inherently serial (Amdahl).
   + Ruby suite (208 tests) + `--stats` byte-diff on the stdlib and stdlib-x8 corpora + A/B with
   `RUBYDEX_SEQUENTIAL_REFERENCES` on the target codebase.
 
+## Upstream sync note (July 2026)
+
+Main was synced with upstream while this branch was in flight. Upstream landed overlapping work:
+`Outcome` was refactored (`Resolved(id)` / `Retry { partial_ancestors }` / unit `Unresolved`, no
+more linearization-id payload), duplicate ancestor enqueueing was reduced (#906),
+`get_or_create_singleton_class` gained `SingletonAncestors` scheduling modes (#907), and
+**`Unresolved` references are now pushed to `pending_work` for the next incremental resolution
+instead of being retried within the current cycle** — the read-only kernel mirrors this with
+`ReadOutcome::Defer` and the sweep routes those references to `extend_work`. The blocker-based
+partial-chain reuse, `enqueue_ancestors` dedup (`Enqueue` mode routes through it), and all parallel
+machinery were re-reconciled on top; `--stats` is byte-identical to origin/main on both corpora and
+the merged branch resolves the 8x stdlib corpus 1.9x faster than origin/main on 4 cores.
+
 ## Unrelated finding (filed for later)
 
 Mixins written in an alias-reopened class body are not merged into the target's ancestors:

@@ -13,7 +13,10 @@ use crate::model::definitions::{Definition, MethodVisibilityDefinition, Receiver
 use crate::model::document::Document;
 use crate::model::encoding::Encoding;
 use crate::model::identity_maps::{IdentityHashMap, IdentityHashSet};
-use crate::model::ids::{ConstantReferenceId, DeclarationId, DefinitionId, MethodReferenceId, NameId, StringId, UriId};
+use crate::model::ids::{
+    ConstantReferenceId, DeclarationId, DefinitionId, MethodReferenceId, NameId, StringId, UriId,
+    declaration_id_from_lookup_name,
+};
 use crate::model::name::{Name, NameRef, ParentScope, ResolvedName};
 use crate::model::references::{ConstantReference, MethodRef};
 use crate::model::string_ref::StringRef;
@@ -578,7 +581,7 @@ impl Graph {
 
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Vec<&Definition>> {
-        let declaration_id = DeclarationId::from(name);
+        let declaration_id = declaration_id_from_lookup_name(name);
         let declaration = self.declarations.get(&declaration_id)?;
 
         Some(
@@ -1270,6 +1273,10 @@ impl Graph {
                 let unqualified_str_id = StringId::from(&decl.unqualified_name());
                 let owner_id = *decl.owner_id();
                 let is_singleton_class = matches!(decl, Declaration::Namespace(Namespace::SingletonClass(_)));
+                let ancestors_to_detach: Vec<Ancestor> = decl
+                    .as_namespace()
+                    .map(|ns| ns.ancestors().iter().copied().collect())
+                    .unwrap_or_default();
 
                 for def_id in def_ids {
                     self.push_work(Unit::Definition(def_id));
@@ -1282,6 +1289,16 @@ impl Graph {
                         ns.clear_singleton_class_id();
                     } else {
                         ns.remove_member(&unqualified_str_id);
+                    }
+                }
+
+                // Detach from each complete ancestor's descendant set so we don't leave a stale id in descendants
+                for ancestor in ancestors_to_detach {
+                    if let Ancestor::Complete(ancestor_id) = ancestor
+                        && let Some(anc_decl) = self.declarations.get_mut(&ancestor_id)
+                        && let Some(ns) = anc_decl.as_namespace_mut()
+                    {
+                        ns.remove_descendant(&decl_id);
                     }
                 }
             }
@@ -1569,6 +1586,10 @@ mod tests {
         assert_declaration_does_not_exist, assert_declaration_kind_eq, assert_dependents, assert_descendants,
         assert_members_eq, assert_no_diagnostics, assert_no_members,
     };
+
+    fn definition_ids(definitions: Vec<&Definition>) -> Vec<DefinitionId> {
+        definitions.into_iter().map(Definition::id).collect()
+    }
 
     #[test]
     fn deleting_a_uri() {
@@ -1990,6 +2011,34 @@ mod tests {
         let definitions = context.graph().get("Foo").unwrap();
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].offset().start(), 6);
+    }
+
+    #[test]
+    fn get_accepts_leading_double_colon() {
+        let mut context = GraphTest::new();
+
+        context.index_uri("file:///foo.rb", "module Foo; module Bar; end; end");
+        context.resolve();
+
+        // Built-in declarations (root-scoped):
+        let unqualified = context.graph().get("Object").expect("unqualified `Object` lookup");
+        let qualified = context.graph().get("::Object").expect("qualified `::Object` lookup");
+        assert_eq!(definition_ids(unqualified), definition_ids(qualified));
+
+        // Indexed declarations, top-level and nested:
+        let unqualified = context.graph().get("Foo").expect("unqualified `Foo` lookup");
+        let qualified = context.graph().get("::Foo").expect("qualified `::Foo` lookup");
+        assert_eq!(definition_ids(unqualified), definition_ids(qualified));
+
+        let unqualified = context.graph().get("Foo::Bar").expect("unqualified `Foo::Bar` lookup");
+        let qualified = context
+            .graph()
+            .get("::Foo::Bar")
+            .expect("qualified `::Foo::Bar` lookup");
+        assert_eq!(definition_ids(unqualified), definition_ids(qualified));
+
+        // Unknown names still return None when prefixed:
+        assert!(context.graph().get("::DoesNotExist").is_none());
     }
 
     #[test]
@@ -2499,6 +2548,7 @@ mod tests {
 
 #[cfg(test)]
 mod incremental_resolution_tests {
+    use crate::model::ids::DeclarationId;
     use crate::model::name::NameRef;
     use crate::test_utils::GraphTest;
     use crate::{
@@ -4125,5 +4175,38 @@ mod incremental_resolution_tests {
         assert_declaration_exists!(context, "Bar");
         assert_declaration_exists!(context, "Foo::<Foo>");
         assert_declaration_exists!(context, "Bar::<Bar>");
+    }
+
+    #[test]
+    fn constant_references_through_object_inheritance_are_invalidated() {
+        let mut context = GraphTest::new();
+        context.index_uri("file:///a.rb", "class Foo; end");
+        context.index_uri(
+            "file:///b.rb",
+            r"
+            module Wrap
+              class Foo; end
+              ::Foo
+              Foo
+            end
+            ",
+        );
+        context.resolve();
+
+        context.delete_uri("file:///a.rb");
+        context.resolve();
+
+        let kernel = context
+            .graph()
+            .declarations()
+            .get(&DeclarationId::from("Kernel"))
+            .unwrap();
+
+        for id in kernel.as_namespace().unwrap().descendants() {
+            assert!(
+                context.graph().declarations().contains_key(id),
+                "Kernel has stale descendant id {id:?} with no backing declaration"
+            );
+        }
     }
 } // mod incremental_resolution_tests
