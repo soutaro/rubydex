@@ -7,10 +7,11 @@ use crate::document_api::DocumentsIter;
 use crate::reference_api::{CConstantReference, CMethodReference, ConstantReferencesIter, MethodReferencesIter};
 use crate::{name_api, utils};
 use libc::{c_char, c_void};
+use rubydex::errors::Errors;
 use rubydex::indexing::LanguageId;
 use rubydex::model::encoding::Encoding;
 use rubydex::model::graph::Graph;
-use rubydex::model::ids::{DeclarationId, NameId, UriId};
+use rubydex::model::ids::{DeclarationId, NameId, UriId, declaration_id_from_lookup_name};
 use rubydex::model::keywords;
 use rubydex::model::name::NameRef;
 use rubydex::model::visibility::Visibility;
@@ -18,7 +19,7 @@ use rubydex::query::{CompletionCandidate, CompletionContext, CompletionReceiver}
 use rubydex::resolution::Resolver;
 use rubydex::{indexing, integrity, listing, query};
 use std::ffi::CString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{mem, ptr};
 
 pub type GraphPointer = *mut c_void;
@@ -57,64 +58,75 @@ where
     result
 }
 
-/// Searches the graph using exact substring matching
+/// Searches the graph using exact substring matching, returning every declaration whose name matches any of the
+/// queries.
 ///
 /// # Safety
 ///
-/// Expects both the graph and the query pointers to be valid
+/// Expects `pointer` to be a valid graph and `c_queries` to point to an array of `count` valid, NUL-terminated C
+/// strings. Returns a null pointer when `count` is zero, `c_queries` is null, or any query is not valid UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_graph_declarations_search(
     pointer: GraphPointer,
-    c_query: *const c_char,
+    c_queries: *const *const c_char,
+    count: usize,
 ) -> *mut DeclarationsIter {
-    {
-        let Ok(query) = (unsafe { utils::convert_char_ptr_to_string(c_query) }) else {
-            return ptr::null_mut();
-        };
-
-        let entries = with_graph(pointer, |graph| {
-            query::declaration_search(graph, &query, &query::MatchMode::Exact)
-                .into_iter()
-                .filter_map(|id| {
-                    let decl = graph.declarations().get(&id)?;
-                    Some(CDeclaration::from_declaration(id, decl))
-                })
-                .collect::<Vec<CDeclaration>>()
-                .into_boxed_slice()
-        });
-
-        DeclarationsIter::new(entries)
+    if count == 0 || c_queries.is_null() {
+        return ptr::null_mut();
     }
+
+    let Ok(queries) = (unsafe { utils::convert_double_pointer_to_vec(c_queries, count) }) else {
+        return ptr::null_mut();
+    };
+    let query_refs: Vec<&str> = queries.iter().map(String::as_str).collect();
+
+    let entries = with_graph(pointer, |graph| {
+        query::declaration_search(graph, &query_refs, &query::MatchMode::Exact)
+            .into_iter()
+            .filter_map(|id| {
+                let decl = graph.declarations().get(&id)?;
+                Some(CDeclaration::from_declaration(id, decl))
+            })
+            .collect::<Vec<CDeclaration>>()
+            .into_boxed_slice()
+    });
+
+    DeclarationsIter::new(entries)
 }
 
-/// Searches the graph using fuzzy matching
+/// Searches the graph using fuzzy matching, returning every declaration whose name matches any of the queries.
 ///
 /// # Safety
 ///
-/// Expects both the graph and the query pointers to be valid
+/// Expects `pointer` to be a valid graph and `c_queries` to point to an array of `count` valid, NUL-terminated C
+/// strings. Returns a null pointer when `count` is zero, `c_queries` is null, or any query is not valid UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdx_graph_declarations_fuzzy_search(
     pointer: GraphPointer,
-    c_query: *const c_char,
+    c_queries: *const *const c_char,
+    count: usize,
 ) -> *mut DeclarationsIter {
-    {
-        let Ok(query) = (unsafe { utils::convert_char_ptr_to_string(c_query) }) else {
-            return ptr::null_mut();
-        };
-
-        let entries = with_graph(pointer, |graph| {
-            query::declaration_search(graph, &query, &query::MatchMode::Fuzzy)
-                .into_iter()
-                .filter_map(|id| {
-                    let decl = graph.declarations().get(&id)?;
-                    Some(CDeclaration::from_declaration(id, decl))
-                })
-                .collect::<Vec<CDeclaration>>()
-                .into_boxed_slice()
-        });
-
-        DeclarationsIter::new(entries)
+    if count == 0 || c_queries.is_null() {
+        return ptr::null_mut();
     }
+
+    let Ok(queries) = (unsafe { utils::convert_double_pointer_to_vec(c_queries, count) }) else {
+        return ptr::null_mut();
+    };
+    let query_refs: Vec<&str> = queries.iter().map(String::as_str).collect();
+
+    let entries = with_graph(pointer, |graph| {
+        query::declaration_search(graph, &query_refs, &query::MatchMode::Fuzzy)
+            .into_iter()
+            .filter_map(|id| {
+                let decl = graph.declarations().get(&id)?;
+                Some(CDeclaration::from_declaration(id, decl))
+            })
+            .collect::<Vec<CDeclaration>>()
+            .into_boxed_slice()
+    });
+
+    DeclarationsIter::new(entries)
 }
 
 /// # Panics
@@ -197,7 +209,13 @@ pub unsafe extern "C" fn rdx_graph_excluded_paths(
         let c_strings: Vec<*const c_char> = excluded
             .iter()
             .filter_map(|path| {
-                CString::new(path.to_string_lossy().as_ref())
+                // Normalize all paths to use forward slashes. Otherwise, you get mixed backslashes and forward slashes
+                // on Windows if a configuration file is using forward slashes. For example:
+                //
+                // C:\project/vendor/bundle
+                let normalized = path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+
+                CString::new(normalized)
                     .ok()
                     .map(|c_string| c_string.into_raw().cast_const())
             })
@@ -240,6 +258,39 @@ pub unsafe extern "C" fn rdx_graph_workspace_path(pointer: GraphPointer) -> *con
     })
 }
 
+/// Loads configuration into the graph. A null `config_path` attempts to load the default configuration file.
+///
+/// Returns NULL on success. On failure returns an owned, null-terminated error message that the caller must free with
+/// `free_c_string`.
+///
+/// A `config_path` that is not valid UTF-8 is reported as an error message.
+///
+/// # Safety
+///
+/// - `pointer` must be a valid `GraphPointer` previously returned by this crate.
+/// - `config_path` must either be NULL or a valid, null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdx_graph_load_config(pointer: GraphPointer, config_path: *const c_char) -> *const c_char {
+    let result = with_mut_graph(pointer, |graph| {
+        if config_path.is_null() {
+            graph.load_config(None)
+        } else {
+            match unsafe { utils::convert_char_ptr_to_string(config_path) } {
+                Ok(config_path) => graph.load_config(Some(Path::new(&config_path))),
+                Err(_) => Err(Errors::ConfigError("config file path is not valid UTF-8".to_string())),
+            }
+        }
+    });
+
+    match result {
+        Ok(()) => ptr::null(),
+        Err(error) => CString::new(error.to_string())
+            .unwrap_or_default()
+            .into_raw()
+            .cast_const(),
+    }
+}
+
 /// Indexes all given file paths in parallel using the provided Graph pointer.
 /// Returns an array of error message strings and writes the count to `out_error_count`.
 /// Returns NULL if there are no errors. Caller must free with `free_c_string_array`.
@@ -262,7 +313,7 @@ pub unsafe extern "C" fn rdx_index_all(
     let file_paths: Vec<String> = unsafe { utils::convert_double_pointer_to_vec(file_paths, count).unwrap() };
 
     with_mut_graph(pointer, |graph| {
-        let (file_paths, listing_errors) = listing::collect_file_paths(file_paths, graph.excluded_paths());
+        let (file_paths, listing_errors) = listing::collect_file_paths(file_paths, &graph.excluded_paths());
         let indexing_errors = indexing::index_files(graph, file_paths, indexing::IndexerBackend::RubyIndexer);
 
         let all_errors: Vec<String> = listing_errors
@@ -458,7 +509,7 @@ pub unsafe extern "C" fn rdx_graph_get_declaration(pointer: GraphPointer, name: 
     };
 
     with_graph(pointer, |graph| {
-        let decl_id = DeclarationId::from(name_str.as_str());
+        let decl_id = declaration_id_from_lookup_name(&name_str);
 
         if let Some(decl) = graph.declarations().get(&decl_id) {
             Box::into_raw(Box::new(CDeclaration::from_declaration(decl_id, decl))).cast_const()
@@ -877,7 +928,7 @@ pub unsafe extern "C" fn rdx_graph_complete_namespace_access(
             graph,
             CompletionReceiver::NamespaceAccess {
                 self_decl_id,
-                namespace_decl_id: DeclarationId::from(name_str.as_str()),
+                namespace_decl_id: declaration_id_from_lookup_name(&name_str),
             },
             Vec::new(),
         )
@@ -911,7 +962,7 @@ pub unsafe extern "C" fn rdx_graph_complete_method_call(
             graph,
             CompletionReceiver::MethodCall {
                 self_decl_id,
-                receiver_decl_id: DeclarationId::from(name_str.as_str()),
+                receiver_decl_id: declaration_id_from_lookup_name(&name_str),
             },
             Vec::new(),
         )
@@ -955,7 +1006,7 @@ pub unsafe extern "C" fn rdx_graph_complete_method_argument(
             CompletionReceiver::MethodArgument {
                 self_decl_id,
                 nesting_name_id,
-                method_decl_id: DeclarationId::from(name_str.as_str()),
+                method_decl_id: declaration_id_from_lookup_name(&name_str),
             },
             names_to_untrack,
         )

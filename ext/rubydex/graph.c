@@ -196,40 +196,54 @@ static VALUE rdxr_graph_yield_search_results(VALUE self, void *iter) {
 
 /*
  * call-seq:
- *   search(query) -> Enumerator[Rubydex::Declaration]
+ *   search(*queries) -> Enumerator[Rubydex::Declaration]
  *
- * Returns an enumerator that yields declarations matching the query exactly by substring.
+ * Returns an enumerator that yields declarations whose name matches any of the queries exactly by substring.
  */
-static VALUE rdxr_graph_search(VALUE self, VALUE query) {
-    Check_Type(query, T_STRING);
+static VALUE rdxr_graph_search(int argc, VALUE *argv, VALUE self) {
+    rb_check_arity(argc, 1, UNLIMITED_ARGUMENTS);
+    VALUE queries = rb_ary_new_from_values(argc, argv);
+    rdxi_check_array_of_strings(queries);
 
     if (!rb_block_given_p()) {
-        return rb_enumeratorize(self, rb_str_new2("search"), 1, &query);
+        return rb_enumeratorize(self, rb_str_new2("search"), argc, argv);
     }
 
     void *graph;
     TypedData_Get_Struct(self, void *, &graph_type, graph);
 
-    return rdxr_graph_yield_search_results(self, rdx_graph_declarations_search(graph, StringValueCStr(query)));
+    size_t length = (size_t)argc;
+    char **converted = rdxi_str_array_to_char(queries, length);
+    void *iter = rdx_graph_declarations_search(graph, (const char *const *)converted, length);
+    rdxi_free_str_array(converted, length);
+
+    return rdxr_graph_yield_search_results(self, iter);
 }
 
 /*
  * call-seq:
- *   fuzzy_search(query) -> Enumerator[Rubydex::Declaration]
+ *   fuzzy_search(*queries) -> Enumerator[Rubydex::Declaration]
  *
- * Returns an enumerator that yields declarations matching the query fuzzily.
+ * Returns an enumerator that yields declarations whose name matches any of the queries fuzzily.
  */
-static VALUE rdxr_graph_fuzzy_search(VALUE self, VALUE query) {
-    Check_Type(query, T_STRING);
+static VALUE rdxr_graph_fuzzy_search(int argc, VALUE *argv, VALUE self) {
+    rb_check_arity(argc, 1, UNLIMITED_ARGUMENTS);
+    VALUE queries = rb_ary_new_from_values(argc, argv);
+    rdxi_check_array_of_strings(queries);
 
     if (!rb_block_given_p()) {
-        return rb_enumeratorize(self, rb_str_new2("fuzzy_search"), 1, &query);
+        return rb_enumeratorize(self, rb_str_new2("fuzzy_search"), argc, argv);
     }
 
     void *graph;
     TypedData_Get_Struct(self, void *, &graph_type, graph);
 
-    return rdxr_graph_yield_search_results(self, rdx_graph_declarations_fuzzy_search(graph, StringValueCStr(query)));
+    size_t length = (size_t)argc;
+    char **converted = rdxi_str_array_to_char(queries, length);
+    void *iter = rdx_graph_declarations_fuzzy_search(graph, (const char *const *)converted, length);
+    rdxi_free_str_array(converted, length);
+
+    return rdxr_graph_yield_search_results(self, iter);
 }
 
 // Body function for rb_ensure in Graph#documents
@@ -843,8 +857,7 @@ static VALUE rdxr_graph_workspace_path(VALUE self) {
         rb_raise(rb_eRuntimeError, "Converting workspace path to Ruby string failed");
     }
 
-    VALUE path = rb_utf8_str_new_cstr(result);
-    free_c_string(result);
+    VALUE path = rdxi_owned_c_string_to_ruby(result);
     return path;
 }
 
@@ -862,6 +875,40 @@ static VALUE rdxr_graph_set_workspace_path(VALUE self, VALUE path) {
 
     rdx_graph_set_workspace_path(graph, StringValueCStr(path));
     return path;
+}
+
+/*
+ * call-seq:
+ *   load_config(config_path = nil) -> void
+ *
+ * Loads a configuration file for the graph. If `config_path` is nil, loads the default configuration file at
+ * `workspace_path/rubydex.toml` if it exists. Will raise on malformed files or if an explicit path is given but the
+ * file does not exist.
+ */
+static VALUE rdxr_graph_load_config(int argc, VALUE *argv, VALUE self) {
+    VALUE config_path;
+    rb_scan_args(argc, argv, "01", &config_path);
+
+    void *graph;
+    TypedData_Get_Struct(self, void *, &graph_type, graph);
+
+    const char *config_path_cstr = NULL;
+
+    if (!NIL_P(config_path)) {
+        Check_Type(config_path, T_STRING);
+        config_path_cstr = StringValueCStr(config_path);
+    }
+
+    const char *error = rdx_graph_load_config(graph, config_path_cstr);
+    if (error == NULL) {
+        return Qnil;
+    }
+
+    VALUE message = rb_utf8_str_new_cstr(error);
+    free_c_string(error);
+
+    VALUE config_error = rb_const_get(mRubydex, rb_intern("ConfigError"));
+    rb_exc_raise(rb_exc_new_str(config_error, message));
 }
 
 /*
@@ -909,8 +956,8 @@ void rdxi_initialize_graph(VALUE moduleRubydex) {
     rb_define_method(cGraph, "diagnostics", rdxr_graph_diagnostics, 0);
     rb_define_method(cGraph, "check_integrity", rdxr_graph_check_integrity, 0);
     rb_define_method(cGraph, "[]", rdxr_graph_aref, 1);
-    rb_define_method(cGraph, "search", rdxr_graph_search, 1);
-    rb_define_method(cGraph, "fuzzy_search", rdxr_graph_fuzzy_search, 1);
+    rb_define_method(cGraph, "search", rdxr_graph_search, -1);
+    rb_define_method(cGraph, "fuzzy_search", rdxr_graph_fuzzy_search, -1);
     rb_define_method(cGraph, "encoding=", rdxr_graph_set_encoding, 1);
     rb_define_method(cGraph, "resolve_require_path", rdxr_graph_resolve_require_path, 2);
     rb_define_method(cGraph, "require_paths", rdxr_graph_require_paths, 1);
@@ -922,5 +969,6 @@ void rdxi_initialize_graph(VALUE moduleRubydex) {
     rb_define_method(cGraph, "excluded_paths", rdxr_graph_excluded_paths, 0);
     rb_define_method(cGraph, "workspace_path", rdxr_graph_workspace_path, 0);
     rb_define_method(cGraph, "workspace_path=", rdxr_graph_set_workspace_path, 1);
+    rb_define_method(cGraph, "load_config", rdxr_graph_load_config, -1);
     rb_define_method(cGraph, "keyword", rdxr_graph_keyword, 1);
 }
