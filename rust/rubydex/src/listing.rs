@@ -6,7 +6,6 @@ use crossbeam_channel::{Sender, unbounded};
 use glob::Pattern;
 use std::{
     collections::HashSet,
-    fs,
     hash::BuildHasher,
     path::{Path, PathBuf},
     sync::Arc,
@@ -57,29 +56,6 @@ impl FileDiscoveryJob {
         }
     }
 
-    fn handle_symlink(&self, path: &PathBuf) {
-        let Ok(canonicalized) = fs::canonicalize(path) else {
-            self.send_error(Errors::FileError(format!(
-                "Failed to canonicalize symlink: `{}`",
-                path.display(),
-            )));
-
-            return;
-        };
-
-        if is_excluded(&self.excluded_patterns, &canonicalized) {
-            return;
-        }
-
-        self.queue.push(Box::new(FileDiscoveryJob::new(
-            canonicalized,
-            Arc::clone(&self.queue),
-            self.paths_tx.clone(),
-            self.errors_tx.clone(),
-            Arc::clone(&self.excluded_patterns),
-        )));
-    }
-
     fn send_error(&self, error: Errors) {
         self.errors_tx
             .send(error)
@@ -89,60 +65,46 @@ impl FileDiscoveryJob {
 
 impl Job for FileDiscoveryJob {
     fn run(&self) {
-        if self.path.is_dir() {
-            let Ok(read_dir) = self.path.read_dir() else {
+        let Ok(read_dir) = self.path.read_dir() else {
+            if self.path.is_file() {
+                self.handle_file(&self.path);
+            } else {
                 self.send_error(Errors::FileError(format!(
                     "Failed to read directory `{}`",
+                    self.path.display()
+                )));
+            }
+
+            return;
+        };
+
+        for result in read_dir {
+            let Ok(entry) = result else {
+                self.send_error(Errors::FileError(format!(
+                    "Failed to read directory `{}`: {result:?}",
                     self.path.display(),
                 )));
 
-                return;
+                continue;
             };
 
-            for result in read_dir {
-                let Ok(entry) = result else {
-                    self.send_error(Errors::FileError(format!(
-                        "Failed to read directory `{}`: {result:?}",
-                        self.path.display(),
-                    )));
+            let path = entry.path();
 
+            if entry.file_type().unwrap().is_dir() {
+                if is_excluded(&self.excluded_patterns, &path) {
                     continue;
-                };
-
-                let kind = entry.file_type().unwrap();
-
-                if kind.is_dir() {
-                    if is_excluded(&self.excluded_patterns, &entry.path()) {
-                        continue;
-                    }
-
-                    self.queue.push(Box::new(FileDiscoveryJob::new(
-                        entry.path(),
-                        Arc::clone(&self.queue),
-                        self.paths_tx.clone(),
-                        self.errors_tx.clone(),
-                        Arc::clone(&self.excluded_patterns),
-                    )));
-                } else if kind.is_file() {
-                    self.handle_file(&entry.path());
-                } else if kind.is_symlink() {
-                    self.handle_symlink(&entry.path());
-                } else {
-                    self.send_error(Errors::FileError(format!(
-                        "Path `{}` is not a file or directory",
-                        entry.path().display()
-                    )));
                 }
+
+                self.queue.push(Box::new(FileDiscoveryJob::new(
+                    path,
+                    Arc::clone(&self.queue),
+                    self.paths_tx.clone(),
+                    self.errors_tx.clone(),
+                    Arc::clone(&self.excluded_patterns),
+                )));
+            } else {
+                self.handle_file(&path);
             }
-        } else if self.path.is_file() {
-            self.handle_file(&self.path);
-        } else if self.path.is_symlink() {
-            self.handle_symlink(&self.path);
-        } else {
-            self.send_error(Errors::FileError(format!(
-                "Path `{}` is not a file or directory",
-                self.path.display()
-            )));
         }
     }
 }
@@ -165,39 +127,32 @@ pub fn collect_file_paths<S: BuildHasher>(
     let (files_tx, files_rx) = unbounded();
     let (errors_tx, errors_rx) = unbounded();
 
-    // Canonicalize concrete excluded paths (they may be symlinks) and escape them so they match exactly, not
-    // as globs. Globs are kept as written.
-    let excluded_patterns: Arc<Vec<Pattern>> = Arc::new(
-        excluded
-            .iter()
-            .filter_map(|entry| {
-                let entry: &str = entry;
-
-                if entry.contains(['*', '?', '[']) {
-                    Pattern::new(entry).ok()
-                } else {
-                    let canonical = fs::canonicalize(entry).ok()?;
-                    Pattern::new(&Pattern::escape(&canonical.to_string_lossy())).ok()
-                }
-            })
-            .collect(),
-    );
+    let excluded_patterns: Arc<Vec<Pattern>> =
+        Arc::new(excluded.iter().filter_map(|entry| Pattern::new(entry).ok()).collect());
 
     for path in paths {
-        let Ok(canonicalized) = fs::canonicalize(&path) else {
+        let Ok(path) = std::path::absolute(&path) else {
             errors_tx
-                .send(Errors::FileError(format!("Path `{path}` does not exist")))
+                .send(Errors::FileError(format!("Failed to resolve path `{path}`")))
                 .expect("errors receiver dropped before run completion");
 
             continue;
         };
 
-        if is_excluded(&excluded_patterns, &canonicalized) {
+        if !path.exists() {
+            errors_tx
+                .send(Errors::FileError(format!("Path `{}` does not exist", path.display())))
+                .expect("errors receiver dropped before run completion");
+
+            continue;
+        }
+
+        if is_excluded(&excluded_patterns, &path) {
             continue;
         }
 
         queue.push(Box::new(FileDiscoveryJob::new(
-            canonicalized,
+            path,
             Arc::clone(&queue),
             files_tx.clone(),
             errors_tx.clone(),
@@ -344,6 +299,31 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn collect_files_emits_absolute_paths_for_relative_roots() {
+        let context = Context::new();
+        context.touch(PathBuf::from("project").join("foo.rb"));
+
+        // Express the project directory as a path relative to the process working directory.
+        let working_directory = std::env::current_dir().unwrap();
+        let mut relative_root = PathBuf::new();
+        for _ in 0..working_directory.components().count() - 1 {
+            relative_root.push("..");
+        }
+        let project = context.absolute_path_to("project");
+        let relative_root = relative_root.join(project.strip_prefix("/").unwrap());
+
+        let (files, errors) = collect_file_paths(vec![relative_root.to_string_lossy().into_owned()], &HashSet::new());
+
+        assert!(errors.is_empty());
+        assert!(!files.is_empty());
+        assert!(
+            files.iter().all(|path| path.is_absolute()),
+            "expected only absolute paths, got {files:?}"
+        );
+    }
+
     #[test]
     fn collect_files_excludes_directories() {
         let context = Context::new();
@@ -370,7 +350,7 @@ mod tests {
         context.touch(&nested);
 
         let mut excluded = HashSet::new();
-        excluded.insert(context.absolute_path_to("root/skip").to_string_lossy().into());
+        excluded.insert("**/skip".into());
 
         let (files, errors) = collect_document_paths_with_exclusions(&context, &["root"], &excluded);
 
@@ -380,40 +360,65 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn collect_files_excludes_symlinked_directories() {
+    fn collect_files_indexes_symlinked_files_at_their_own_path() {
         let context = Context::new();
-        let included = PathBuf::from("included").join("foo.rb");
-        let excluded_file = PathBuf::from("real_dir").join("bar.rb");
-        context.touch(&included);
-        context.touch(&excluded_file);
+        let target = PathBuf::from("outside").join("real.rb");
+        context.touch(&target);
+        context.mkdir("project");
 
-        // Create a symlink: link -> real_dir
-        std::os::unix::fs::symlink(context.absolute_path_to("real_dir"), context.absolute_path_to("link")).unwrap();
+        // Create a symlink to a file outside the traversed tree: project/alias.rb -> outside/real.rb
+        std::os::unix::fs::symlink(
+            context.absolute_path_to("outside/real.rb"),
+            context.absolute_path_to("project/alias.rb"),
+        )
+        .unwrap();
 
-        // Excluding the real directory while requesting to index the symlink should properly exclude the link
-        let mut excluded = HashSet::new();
-        excluded.insert(context.absolute_path_to("real_dir").to_string_lossy().into());
-
-        let (files, errors) = collect_document_paths_with_exclusions(&context, &["included", "link"], &excluded);
+        let (files, errors) = collect_document_paths(&context, &["project"]);
 
         assert!(errors.is_empty());
-        assert_eq!(files, [included.to_str().unwrap().to_string()]);
+        // The symlink is indexed at its own path, not resolved to the target.
+        let alias = PathBuf::from("project").join("alias.rb");
+        assert_eq!(files, [alias.to_str().unwrap().to_string()]);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn collect_files_excludes_glob_patterns() {
+    fn collect_files_does_not_follow_symlinked_directories() {
         let context = Context::new();
-        let kept = PathBuf::from("lib").join("foo.rb");
-        let nested = PathBuf::from("lib").join("test/fixtures").join("bar.rb");
+        let kept = PathBuf::from("project").join("foo.rb");
+        let outside = PathBuf::from("outside").join("bar.rb");
         context.touch(&kept);
-        context.touch(&nested);
+        context.touch(&outside);
 
-        let mut excluded = HashSet::new();
-        excluded.insert("**/fixtures".into());
+        // Create a symlink inside the traversed tree: project/link -> outside
+        std::os::unix::fs::symlink(
+            context.absolute_path_to("outside"),
+            context.absolute_path_to("project/link"),
+        )
+        .unwrap();
 
-        let (files, errors) = collect_document_paths_with_exclusions(&context, &["lib"], &excluded);
+        let (files, errors) = collect_document_paths(&context, &["project"]);
 
         assert!(errors.is_empty());
+        // The symlinked directory is not followed, so `outside/bar.rb` is never reached.
         assert_eq!(files, [kept.to_str().unwrap().to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_files_indexes_symlinked_directory_roots() {
+        let context = Context::new();
+        let target = PathBuf::from("real").join("foo.rb");
+        context.touch(&target);
+
+        // A symlink to a directory passed as an explicit root, as `Graph#workspace_paths` does via `File.directory?`.
+        std::os::unix::fs::symlink(context.absolute_path_to("real"), context.absolute_path_to("link")).unwrap();
+
+        let (files, errors) = collect_document_paths(&context, &["link"]);
+
+        assert!(errors.is_empty());
+        // The requested root is traversed; files are indexed under the requested (symlink) path.
+        let foo = PathBuf::from("link").join("foo.rb");
+        assert_eq!(files, [foo.to_str().unwrap().to_string()]);
     }
 }
