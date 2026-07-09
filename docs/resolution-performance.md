@@ -247,6 +247,40 @@ file + resolve, then a no-op resolve. On the 8x stdlib corpus the no-op resolve 
    definitions belong to declarations with definitions in all copies), but worth profiling on a
    real codebase — `name_dependents` and descendant-based re-queueing may over-approximate.
 
+### Invalidation scope (next focus — the typical-case incremental cost)
+
+The huge unresolved backlog above is an artifact of missing gem sources; with a fully-indexed
+codebase the incremental cost is dominated by **invalidation fan-out**. Measured on a synthetic,
+fully-resolvable corpus (2k files, every reference resolves): re-indexing **one unchanged file**
+re-queues ~605 references and ~42 chains — ~40x the file's own content, where the correct answer
+is zero. Causes, from reading `remove_document_data` / `invalidate_declaration`:
+
+1. **No update diffing**: a document update is remove-everything + re-add, and the removal cascade
+   completes before the identical definitions are re-added. Even a byte-identical save pays the
+   full storm.
+2. **Single-file declarations take the Remove path**: saving the file removes the declaration's
+   only definitions, so the declaration is deleted outright — unresolving *every reference to it
+   from every file* — and then recreated identically by the re-add.
+3. **Update path resets chains unconditionally** (upstream's own TODO in
+   `invalidate_declaration`): any definition churn on a declaration clears its ancestors and
+   descendants and re-queues the descendants' chains, even when the mixins/superclass are
+   unchanged.
+
+Proposed direction, in increasing order of effort:
+
+- **Document-content short-circuit**: skip the update entirely when the new content hash equals
+  the old (editor auto-saves become free).
+- **Definition-set reconciliation**: index the new content first, diff the definition sets
+  (DefinitionIds are content-addressed by uri/offset/name, so unchanged prefixes of the file keep
+  their IDs), and run invalidation only on the symmetric difference. Follow-up: match old/new
+  definitions by (name, kind, ordinal) and patch offsets in place, so an edit near the top of a
+  file doesn't invalidate every definition below it.
+- **Ancestor-relevant change detection**: on the Update path, compare the old and new definitions'
+  mixins/superclass and skip the chain + descendants reset when they are equal (this is what
+  upstream's TODO asks for; it makes method-body edits not touch the hierarchy at all).
+- The operation builder/applier backend (`operation/`) may already be intended as the diffing
+  pipeline — check whether update reconciliation belongs there before building it elsewhere.
+
 ## Invariants to preserve when continuing
 
 - **Determinism**: parallel compute must be pure (snapshot reads); all writes applied in an order
