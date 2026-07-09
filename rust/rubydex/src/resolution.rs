@@ -584,6 +584,37 @@ impl<'a> Resolver<'a> {
     /// cheaper than tracking descendants incrementally during linearization, which keeps re-inserting the same entries
     /// every time a cached chain is revisited.
     fn compute_descendants(&mut self) {
+        // After the first full build, descendant sets are maintained incrementally: invalidation removes the edges
+        // of changed/removed declarations, and here we (re-)apply the edges of every chain that was (re)built since
+        // the last resolve. This keeps the cost proportional to the change instead of the graph
+        if self.graph.descendants_initialized() {
+            for declaration_id in self.graph.take_pending_descendant_chains() {
+                // The declaration may have been removed by invalidation after its chain was built
+                let Some(ancestors) = self
+                    .graph
+                    .declarations()
+                    .get(&declaration_id)
+                    .and_then(Declaration::as_namespace)
+                    .map(Namespace::clone_ancestors)
+                else {
+                    continue;
+                };
+
+                for ancestor in &ancestors {
+                    if let Ancestor::Complete(ancestor_id) = ancestor
+                        && let Some(declaration) = self.graph.declarations_mut().get_mut(ancestor_id)
+                        && let Some(namespace) = declaration.as_namespace_mut()
+                    {
+                        namespace.add_descendant(declaration_id);
+                    }
+                }
+            }
+
+            return;
+        }
+
+        self.graph.take_pending_descendant_chains();
+
         let namespace_ids: Vec<DeclarationId> = self
             .graph
             .declarations()
@@ -623,6 +654,8 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
+
+        self.graph.set_descendants_initialized();
     }
 
     /// Resolves a single constant against the graph. This method is not meant to be used by the resolution phase, but by
@@ -1529,6 +1562,7 @@ impl<'a> Resolver<'a> {
                     .as_namespace_mut()
                     .unwrap()
                     .set_ancestors(estimated_ancestors.clone());
+                self.graph.record_built_chain(declaration_id);
 
                 context.finalize(declaration_id);
                 return estimated_ancestors;
@@ -1601,6 +1635,7 @@ impl<'a> Resolver<'a> {
             .as_namespace_mut()
             .unwrap()
             .set_ancestors(result.clone());
+        self.graph.record_built_chain(declaration_id);
 
         self.dirty_chains.remove(&declaration_id);
 
@@ -2409,7 +2444,40 @@ impl<'a> Resolver<'a> {
         let names = self.graph.names();
 
         let started = profile.start();
-        self.name_depths = Self::compute_name_depths(names);
+        // For a full resolve, every name's depth is needed, so precompute them all. For incremental resolves
+        // (pending work much smaller than the graph), compute depths only for the names the pending units mention —
+        // the memoized recursion pulls in just their parent/nesting chains, keeping the cost proportional to the
+        // change instead of the graph
+        if work.len() >= names.len() {
+            self.name_depths = Self::compute_name_depths(names);
+        } else {
+            let mut cache = IdentityHashMap::default();
+
+            for unit in &work {
+                let name_id = match unit {
+                    Unit::Definition(id) => match self.graph.definitions().get(id) {
+                        Some(Definition::Class(def)) => Some(*def.name_id()),
+                        Some(Definition::Module(def)) => Some(*def.name_id()),
+                        Some(Definition::Constant(def)) => Some(*def.name_id()),
+                        Some(Definition::ConstantAlias(def)) => Some(*def.name_id()),
+                        Some(Definition::SingletonClass(def)) => Some(*def.name_id()),
+                        _ => None,
+                    },
+                    Unit::ConstantRef(id) => self
+                        .graph
+                        .constant_references()
+                        .get(id)
+                        .map(|constant_ref| *constant_ref.name_id()),
+                    Unit::Ancestors(_) => None,
+                };
+
+                if let Some(name_id) = name_id {
+                    Self::name_depth(name_id, names, &mut cache);
+                }
+            }
+
+            self.name_depths = cache;
+        }
         let depths = &self.name_depths;
         ResolutionProfile::record(&mut profile.prepare_depths, started);
         let started = profile.start();

@@ -90,10 +90,19 @@ pub struct Graph {
     /// Drained by `take_pending_work()` before resolution.
     pending_work: Vec<Unit>,
 
+    /// Declarations whose ancestor chain was (re)built since descendants were last updated. Drained at the end of
+    /// `resolve()` to update descendant sets incrementally (chain edges are only added here; stale edges are removed
+    /// by invalidation).
+    pending_descendant_chains: IdentityHashSet<DeclarationId>,
+
+    /// Whether descendant sets have been fully computed at least once. Until then, `resolve()` performs a full
+    /// rebuild by inverting every ancestor chain; afterwards it only applies `pending_descendant_chains`.
+    descendants_initialized: bool,
+
     /// Project configuration
     config: Config,
 }
-assert_mem_size!(Graph, 352);
+assert_mem_size!(Graph, 384);
 
 impl Graph {
     #[must_use]
@@ -109,6 +118,8 @@ impl Graph {
             position_encoding: Encoding::default(),
             name_dependents: IdentityHashMap::default(),
             pending_work: Vec::default(),
+            pending_descendant_chains: IdentityHashSet::default(),
+            descendants_initialized: false,
             config: Config::new(),
         };
 
@@ -738,6 +749,24 @@ impl Graph {
     /// Drains the accumulated work items, returning them for use by the resolver.
     pub fn take_pending_work(&mut self) -> Vec<Unit> {
         std::mem::take(&mut self.pending_work)
+    }
+
+    /// Records that a declaration's ancestor chain was (re)built, so its descendant edges get applied at the end of
+    /// the next `resolve()`
+    pub(crate) fn record_built_chain(&mut self, declaration_id: DeclarationId) {
+        self.pending_descendant_chains.insert(declaration_id);
+    }
+
+    pub(crate) fn take_pending_descendant_chains(&mut self) -> IdentityHashSet<DeclarationId> {
+        std::mem::take(&mut self.pending_descendant_chains)
+    }
+
+    pub(crate) fn descendants_initialized(&self) -> bool {
+        self.descendants_initialized
+    }
+
+    pub(crate) fn set_descendants_initialized(&mut self) {
+        self.descendants_initialized = true;
     }
 
     pub(crate) fn push_work(&mut self, unit: Unit) {
