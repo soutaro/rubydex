@@ -213,6 +213,40 @@ Whenever the serial resolution logic changes (`resolve_constant_internal`, `run_
    way past the serial-write Amdahl wall, but invasive (FFI, invalidation, determinism) for ~2–3s
    at current sizes. Revisit after (2).
 
+## Incremental resolution (in progress)
+
+`examples/incremental.rs` benchmarks the LSP-style flow: index + resolve, re-index one edited
+file + resolve, then a no-op resolve. On the 8x stdlib corpus the no-op resolve — which should be
+~free — cost 30ms; on production codebases it extrapolates to ~1s per edit. Three causes:
+
+1. **Fixed O(graph) costs per resolve** — fixed in `711770e`: `compute_name_depths` now computes
+   depths lazily for the pending units' names only, and descendant sets are maintained
+   incrementally after the first full build (linearization records rebuilt chains in
+   `Graph::pending_descendant_chains`; invalidation already removes stale edges). This removed
+   ~0.8s/resolve on codebase B-scale graphs.
+2. **Permanently unresolvable units re-attempted every resolve** (~53k units on the 8x corpus,
+   ~744k on codebase B): `pending_work` is fully drained and re-attempted by every `resolve()`,
+   paying classification, sorting, and resolution for units that cannot make progress. This is now
+   the dominant no-op cost. **Design for the fix (not yet implemented) — event-keyed parking:**
+   - Park units that end a resolve without progress, keyed by what would unblock them:
+     `Unresolved`-class lookups by the missing member's `StringId` (woken when `add_member`
+     touches that string), `Retry`-class units by the blocking `NameId` (unresolved parent scope /
+     partial-chain blocker, woken by `record_resolved_name` / chain completion).
+   - The graph accumulates wake events (append-only lists filled by `add_member` /
+     `record_resolved_name`); the convergence loop drains events between passes and moves woken
+     units back into the queue, and events persist across resolves so parked units wake in the
+     first pass of the next resolve. This replaces both the in-loop blind retries (the tail
+     passes) and the cross-resolve re-attempts, and doubles as the dependency edges for any future
+     scheduling work.
+   - Watch out for: staleness (parked units whose reference/definition was deleted — validate on
+     wake, as prepare_units already does), the tentative Object-fallback resolutions (must not
+     park a unit that the serial path would still retry), and determinism of wake order (drain
+     events in insertion order).
+3. **Invalidation fan-out** (not yet investigated): editing one small file re-queued ~15k
+   references on the 8x corpus. Partly a corpus artifact (8 copies share FQNs, so one file's
+   definitions belong to declarations with definitions in all copies), but worth profiling on a
+   real codebase — `name_dependents` and descendant-based re-queueing may over-approximate.
+
 ## Invariants to preserve when continuing
 
 - **Determinism**: parallel compute must be pure (snapshot reads); all writes applied in an order
