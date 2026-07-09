@@ -116,9 +116,7 @@ impl OperationApplier {
             _ => {}
         }
     }
-}
 
-impl OperationApplier {
     fn apply_operation(&mut self, op: Operation) {
         match op {
             Operation::EnterClass(op) => self.apply_enter_class(op),

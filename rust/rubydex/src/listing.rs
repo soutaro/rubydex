@@ -36,18 +36,7 @@ impl FileDiscoveryJob {
             excluded_patterns,
         }
     }
-}
 
-fn is_indexable_file(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext == "rb" || ext == "rake" || ext == "rbs" || ext == "ru")
-}
-
-fn is_excluded(excluded_patterns: &[Pattern], path: &Path) -> bool {
-    excluded_patterns.iter().any(|pattern| pattern.matches_path(path))
-}
-
-impl FileDiscoveryJob {
     fn handle_file(&self, path: &Path) {
         if is_indexable_file(path) {
             self.paths_tx
@@ -107,6 +96,15 @@ impl Job for FileDiscoveryJob {
             }
         }
     }
+}
+
+fn is_indexable_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext == "rb" || ext == "rake" || ext == "rbs" || ext == "ru")
+}
+
+fn is_excluded(excluded_patterns: &[Pattern], path: &Path) -> bool {
+    excluded_patterns.iter().any(|pattern| pattern.matches_path(path))
 }
 
 /// Recursively collects all Ruby files for the given workspace and dependencies, returning a vector of document instances
